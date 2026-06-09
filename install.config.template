@@ -1,0 +1,6 @@
+# install.config — machine-specific settings for setup.sh
+# Copy this file to install.config and fill in your values:
+#   cp install.config.template install.config
+
+REGION="eu-central-1"
+PROFILE="your-aws-profile-name"

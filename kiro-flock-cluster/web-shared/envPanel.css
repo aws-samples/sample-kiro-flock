@@ -1,0 +1,230 @@
+/* =========================================================================
+   Shared environment panel styles.
+
+   Consumed by both the single-cluster dashboard (web/) and WeltenBuilder
+   (weltenbuilder/web/). Relies on CSS custom properties that both apps
+   declare at :root: --bg, --surface, --surface-2, --border, --border-light,
+   --text, --text-dim, --text-muted, --accent, --accent-dim, --red, --red-dim,
+   --mono, --sans.
+   ========================================================================= */
+
+.env-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.env-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.env-panel-title {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.env-panel-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.env-btn {
+  padding: 2px 6px;
+  font-size: 10px;
+  color: var(--text-muted);
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  font-family: var(--sans);
+}
+.env-btn:hover { color: var(--accent); border-color: var(--accent); }
+.env-btn--danger { color: var(--red); }
+.env-btn--danger:hover { color: var(--red); border-color: var(--red); background: var(--red-dim); }
+
+.env-panel-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 0;
+  min-height: 0;
+}
+.env-panel-viewer {
+  flex: 1;
+  overflow-y: auto;
+  padding: 14px;
+  min-height: 0;
+}
+
+.env-note {
+  padding: 6px 14px;
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+}
+.env-note--kb { /* same treatment as .env-note; distinct class so future
+                 tweaks can differ */ }
+
+.env-tree { list-style: none; margin: 0; padding: 0; }
+.env-tree ul { list-style: none; margin: 0; padding: 0; }
+
+.env-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 14px;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text);
+  white-space: nowrap;
+}
+.env-row:hover { background: var(--surface-2); }
+.env-row--folder { font-weight: 500; }
+.env-row--cluster {
+  color: var(--accent);
+  font-family: var(--mono);
+  font-weight: 600;
+}
+.env-row--file {
+  font-family: var(--mono);
+  color: var(--text-dim);
+}
+.env-row--file.active { background: var(--accent-dim); }
+
+.env-toggle {
+  width: 12px;
+  display: inline-block;
+  font-size: 10px;
+  color: var(--text-muted);
+  text-align: center;
+  flex-shrink: 0;
+}
+.env-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+.env-meta {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+.env-dl-inline {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-muted);
+  font-size: 10px;
+  padding: 1px 5px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.env-dl-inline:hover { color: var(--accent); border-color: var(--accent); }
+
+.env-empty {
+  padding: 24px 14px;
+  font-size: 12px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+/* File viewer (markdown or plain text). Shares type styles with the
+   wider app so headings and code blocks read consistently. */
+.env-panel-viewer pre {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.6;
+  background: var(--bg);
+  padding: 10px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  overflow-x: auto;
+}
+.env-viewer-md h1, .env-viewer-md h2, .env-viewer-md h3 {
+  color: var(--text);
+  margin: 12px 0 6px;
+  line-height: 1.3;
+}
+.env-viewer-md h1 { font-size: 16px; }
+.env-viewer-md h2 { font-size: 14px; }
+.env-viewer-md h3 { font-size: 13px; color: var(--text-dim); }
+.env-viewer-md p { font-size: 13px; color: var(--text-dim); margin: 6px 0; line-height: 1.6; }
+.env-viewer-md ul, .env-viewer-md ol { padding-left: 18px; margin: 6px 0; }
+.env-viewer-md li { font-size: 13px; color: var(--text-dim); margin: 2px 0; }
+.env-viewer-md code {
+  font-family: var(--mono);
+  font-size: 11px;
+  background: var(--surface-2);
+  padding: 1px 4px;
+  border-radius: 3px;
+  color: var(--accent);
+}
+.env-viewer-md blockquote {
+  border-left: 3px solid var(--accent);
+  padding-left: 10px;
+  margin: 8px 0;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+.env-viewer-md hr { border: none; border-top: 1px solid var(--border); margin: 10px 0; }
+.env-viewer-md strong { color: var(--text); }
+
+/* Syntax-highlighted source files (highlight.js). Override the theme's
+   background to match the panel's dark surface. */
+.env-viewer-code {
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.6;
+  background: var(--bg);
+  padding: 10px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  overflow-x: auto;
+  margin: 0;
+}
+.env-viewer-code code.hljs {
+  background: transparent;
+  padding: 0;
+}
+
+/* Tables rendered by marked */
+.env-viewer-md table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 10px 0;
+  font-size: 12px;
+  font-family: var(--mono);
+}
+.env-viewer-md th,
+.env-viewer-md td {
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  text-align: left;
+  color: var(--text-dim);
+}
+.env-viewer-md th {
+  background: var(--surface-2);
+  color: var(--text);
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+.env-viewer-md tr:hover td {
+  background: var(--surface-2);
+}

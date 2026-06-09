@@ -1,0 +1,640 @@
+/* ============================================================================
+   WeltenBuilder stylesheet — amorphous dark theme.
+
+   WeltenBuilder is the multi-cluster sibling of the kiro-flock single-cluster
+   dashboard (web/). The two apps share Cognito, API Gateway, and the cluster
+   API; this stylesheet mirrors the dashboard's visual language (same palette,
+   same typography, same field metrics) so the two feel like one product.
+
+   Clicking a cluster card navigates to the dashboard with ?cluster=<id>.
+   The only UX here that the dashboard doesn't have is the cluster overview
+   grid + "+" create tile + environment tree.
+   ============================================================================ */
+
+:root {
+  --bg: #0a0a0f;
+  --surface: #111118;
+  --surface-2: #1a1a24;
+  --border: #2a2a3a;
+  --border-light: #3a3a50;
+  --text: #ffffff;
+  --text-dim: #e0e0ea;
+  --text-muted: #a0a0b8;
+  --accent: #9046ff;
+  --accent-dim: rgba(144, 70, 255, 0.18);
+  --accent-hover: #a060ff;
+  --green: #34d399;
+  --green-dim: rgba(52, 211, 153, 0.15);
+  --yellow: #facc15;
+  --yellow-dim: rgba(250, 204, 21, 0.15);
+  --red: #fb7185;
+  --red-dim: rgba(251, 113, 133, 0.15);
+  --mono: 'SF Mono', 'Cascadia Code', 'Fira Code', 'Menlo', monospace;
+  --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+
+  --radius: 6px;
+  --radius-lg: 8px;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body { height: 100%; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.5;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* ---------- Topbar (mirrors the dashboard) -------------------------------- */
+
+.wb-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 24px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  flex-shrink: 0;
+}
+
+.wb-header-left {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.wb-logo {
+  font-family: var(--mono);
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--accent);
+  letter-spacing: -0.5px;
+}
+.wb-logo span { color: var(--text-dim); font-weight: 400; }
+.wb-logo .logo-welten {
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+/* Last-updated timestamp in the header. Shows when the cluster list
+   was last successfully fetched. Stays visible at all times so the
+   operator can tell at a glance how fresh the data is. Flips red on
+   error to signal a stale view. */
+.wb-poll-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  letter-spacing: 0.3px;
+}
+.wb-poll-indicator.error { color: var(--red); }
+
+.wb-header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Topbar buttons match the dashboard's Sign out / WeltenBuilder link style. */
+.wb-topbtn {
+  font-size: 11px;
+  padding: 4px 12px;
+  background: var(--surface-2);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-family: var(--sans);
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+}
+.wb-topbtn:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--border-light);
+}
+.wb-topbtn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Legacy classes still referenced from generic button usage. */
+.wb-btn {
+  padding: 6px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-family: var(--sans);
+  font-size: 13px;
+  font-weight: 500;
+  background: var(--surface-2);
+  color: var(--text);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.wb-btn:hover:not(:disabled) { border-color: var(--border-light); }
+.wb-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.wb-btn-ghost { background: var(--surface-2); color: var(--text-muted); }
+.wb-btn-ghost:hover:not(:disabled) { color: var(--text); }
+.wb-btn-danger-solid {
+  background: var(--red);
+  color: #1a0a0a;
+  border-color: var(--red);
+}
+.wb-btn-danger-solid:hover:not(:disabled) {
+  background: #ff8595;
+  border-color: #ff8595;
+}
+
+.wb-muted { color: var(--text-muted); font-size: 12px; }
+
+/* ---------- Per-algorithm theme scopes ------------------------------------
+   Applied to cluster cards and the drill-down header/body so each cluster
+   carries its algorithm's accent. App chrome (topbar, env panel, resize
+   handle) stays amorphous purple so the two apps feel like one product.
+
+   Palette echoes the dashboard's body[data-algorithm=...] scheme but
+   overrides only --accent, --accent-hover, --accent-dim. The rest of the
+   theme variables stay at their root (dark) values so a swarm card still
+   reads as dark-themed. */
+.wb-algo--amorphous {
+  --accent: #9046ff;
+  --accent-hover: #a060ff;
+  --accent-dim: rgba(144, 70, 255, 0.18);
+}
+.wb-algo--mesh {
+  --accent: #c44536;
+  --accent-hover: #d85a49;
+  --accent-dim: rgba(196, 69, 54, 0.18);
+}
+.wb-algo--swarm {
+  --accent: #6aa6d6;
+  --accent-hover: #7cb5df;
+  --accent-dim: rgba(106, 166, 214, 0.18);
+}
+
+/* ---------- Main layout --------------------------------------------------- */
+
+.wb-main {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+  min-height: 0;
+}
+
+.wb-main-left {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-width: 0;
+}
+
+.wb-main-left-top {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+  padding: 16px 20px;
+}
+
+/* Drag handle between the cluster grid and the environment panel. Mirrors
+   the dashboard's .resize-handle. */
+.wb-resize-handle {
+  width: 5px;
+  cursor: col-resize;
+  background: var(--border);
+  flex-shrink: 0;
+  transition: background 0.15s;
+}
+.wb-resize-handle:hover,
+.wb-resize-handle.dragging {
+  background: var(--accent);
+}
+
+.wb-main-right {
+  width: 280px;
+  min-width: 160px;
+  max-width: 70vw;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--border);
+  background: var(--surface);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+/* ---------- Cluster grid -------------------------------------------------- */
+
+.wb-cluster-stacks {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 20px;
+  padding-bottom: 12px;
+}
+
+.wb-cluster-stack {
+  position: relative;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 150px;
+  cursor: pointer;
+  transition: border-color 0.15s, transform 0.1s;
+  z-index: 1;
+}
+/* Stacked-card effect: two offset pseudo-layers behind the main card. */
+.wb-cluster-stack::before,
+.wb-cluster-stack::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  z-index: -1;
+  pointer-events: none;
+}
+.wb-cluster-stack::before {
+  transform: translate(5px, 5px);
+}
+.wb-cluster-stack::after {
+  transform: translate(10px, 10px);
+}
+/* The "+" new-cluster card should not have the stack effect. */
+.wb-cluster-stack-new::before,
+.wb-cluster-stack-new::after {
+  display: none;
+}
+.wb-cluster-stack:hover {
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+.wb-cluster-stack:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-dim);
+}
+
+/* Cards rendered from localStorage cache before the first real poll.
+   Dimmed so the operator knows the data is potentially stale; the
+   .wb-poll-indicator in the header explains the dimming. Cleared by
+   the first successful pollClusters() response. */
+.wb-cluster-stack.wb-stale {
+  opacity: 0.55;
+  filter: saturate(0.7);
+}
+
+.wb-stack-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+.wb-stack-header-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.wb-stack-name {
+  font-family: var(--mono);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--accent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.wb-stack-algo {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: lowercase;
+}
+
+/* Cluster state badge, same shape as the dashboard's .badge. */
+.wb-stack-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 20px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  flex-shrink: 0;
+}
+.wb-stack-state::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+.wb-state--running { background: var(--green-dim); color: var(--green); }
+.wb-state--running::before { background: var(--green); box-shadow: 0 0 8px var(--green); }
+.wb-state--starting { background: var(--accent-dim); color: var(--accent); }
+.wb-state--starting::before { background: var(--accent); animation: wb-pulse 1.5s ease-in-out infinite; }
+.wb-state--stopping { background: var(--red-dim); color: var(--red); }
+.wb-state--stopping::before { background: var(--red); animation: wb-pulse 1.5s ease-in-out infinite; }
+.wb-state--stopped { background: var(--surface-2); color: var(--text-muted); }
+.wb-state--stopped::before { background: var(--text-muted); }
+.wb-state--paused { background: var(--yellow-dim); color: var(--yellow); }
+.wb-state--paused::before { background: var(--yellow); }
+.wb-state--unknown { background: var(--surface-2); color: var(--text-muted); }
+.wb-state--unknown::before { background: var(--text-muted); }
+
+@keyframes wb-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+.wb-stack-direction {
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.5;
+  min-height: 18px;
+}
+
+.wb-stack-config {
+  display: flex;
+  gap: 8px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  flex-wrap: wrap;
+}
+.wb-stack-config-label {
+  color: var(--text-muted);
+  margin-right: 2px;
+}
+.wb-stack-config-sep { color: var(--border-light); }
+
+/* Per-cluster "last update" line — agent id, relative time, action.
+   Sits between the direction preview and the config summary so the
+   operator can see at a glance whether the cluster is actually doing
+   anything without having to drill in. Backed by ListObjectsV2 +
+   ranged GetObject in /cluster/list, so it stays fast at any cluster
+   count. */
+.wb-stack-last {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.wb-stack-last-agent { color: var(--accent); font-weight: 600; }
+.wb-stack-last-ago { color: var(--text-dim); }
+.wb-stack-last-sep { color: var(--border-light); }
+.wb-stack-last-action {
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
+}
+.wb-stack-last--empty { font-style: italic; color: var(--text-muted); }
+
+/* Per-card action buttons: Start / Stop / Pause / Send. Small, tight, same
+   visual language as the dashboard's controls bar but miniaturised. */
+.wb-stack-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: auto;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+.wb-stack-btn {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 8px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text-dim);
+  font-family: var(--sans);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.1s, border-color 0.1s, color 0.1s;
+}
+.wb-stack-btn:hover:not(:disabled) {
+  border-color: var(--border-light);
+  color: var(--text);
+}
+.wb-stack-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.wb-stack-btn--stop { color: var(--red); }
+.wb-stack-btn--stop:hover:not(:disabled) {
+  background: var(--red-dim);
+  border-color: var(--red);
+  color: var(--red);
+}
+.wb-stack-btn--pause { color: var(--yellow); }
+.wb-stack-btn--pause:hover:not(:disabled) {
+  background: var(--yellow-dim);
+  border-color: var(--yellow);
+  color: var(--yellow);
+}
+.wb-stack-btn--send { color: var(--accent); }
+.wb-stack-btn--send:hover:not(:disabled) {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.wb-cluster-stack-new {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px dashed var(--border);
+  color: var(--text-muted);
+  min-height: 150px;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+.wb-cluster-stack-new:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--surface-2);
+  transform: translateY(-1px);
+}
+.wb-cluster-stack-new-plus {
+  font-size: 28px;
+  font-weight: 300;
+  line-height: 1;
+}
+.wb-cluster-stack-new-label {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+/* ---------- Environment panel host ---------------------------------------
+   The panel contents come from web-shared/envPanel.{js,css}. Only the
+   host container's border + background live here so WeltenBuilder's own
+   chrome remains consistent. .wb-main-right controls width/resize. */
+
+/* ---------- Confirm dialog (Stop All, Pause All, Clean Environment) ------ */
+
+.wb-confirm {
+  position: fixed;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 950;
+}
+.wb-confirm.visible { display: flex; }
+.wb-confirm-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+}
+.wb-confirm-panel {
+  position: relative;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  width: min(520px, 92vw);
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+.wb-confirm-header {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.wb-confirm-title {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--accent);
+  font-weight: 600;
+}
+.wb-confirm-body {
+  padding: 16px;
+  overflow-y: auto;
+  flex: 1;
+  color: var(--text-dim);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.wb-confirm-footer {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* ---------- Direction popup (show all) ------------------------------------- */
+
+.wb-stack-direction-more {
+  display: inline;
+  font-size: 11px;
+  color: var(--accent);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.wb-stack-direction-more:hover { text-decoration: underline; }
+
+.wb-dir-popup {
+  position: fixed;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 940;
+}
+.wb-dir-popup.visible { display: flex; }
+.wb-dir-popup-panel {
+  position: relative;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  width: min(680px, 92vw);
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+.wb-dir-popup-panel .wb-confirm-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.wb-dir-popup-close {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 20px;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+}
+.wb-dir-popup-close:hover { color: var(--text); }
+.wb-dir-popup-body {
+  padding: 16px;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+/* ---------- Toast --------------------------------------------------------- */
+
+.wb-toast {
+  display: none;
+  position: fixed;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 8px 20px;
+  border-radius: var(--radius);
+  font-family: var(--mono);
+  font-size: 12px;
+  z-index: 1000;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  max-width: 80vw;
+}
+.wb-toast.visible { display: block; }
+.wb-toast-error {
+  background: var(--red-dim);
+  color: var(--red);
+  border-color: rgba(251, 113, 133, 0.3);
+}
+.wb-toast-info {
+  background: var(--accent-dim);
+  color: var(--accent);
+  border-color: rgba(144, 70, 255, 0.3);
+}
+
+@media (max-width: 600px) {
+  .wb-header, .wb-main-left-top { padding-left: 14px; padding-right: 14px; }
+  .wb-cluster-stacks { grid-template-columns: 1fr; }
+  .wb-main-right { display: none; }
+  .wb-resize-handle { display: none; }
+}

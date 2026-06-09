@@ -1,0 +1,1 @@
+**Algorithm: amorphous.** These are your immediate ring neighbours, positioned to the left and right of you in a logical ring. You can only see a small slice of the cluster — the rest is invisible to you, and that's intentional. Use what your neighbours say as local gradient. Diversity across the ring comes from everyone reading only their own slice.

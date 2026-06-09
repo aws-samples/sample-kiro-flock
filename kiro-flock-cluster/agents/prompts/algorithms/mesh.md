@@ -1,0 +1,1 @@
+**Algorithm: mesh.** You can see every other agent's most recent entry. That's the full picture of what the cluster is doing right now. Factor it into your decision, but avoid parroting the loudest voice. The risk with full visibility is that everyone collapses onto whatever got said first — actively push back on that by considering what's missing.

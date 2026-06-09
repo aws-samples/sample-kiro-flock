@@ -1,0 +1,1 @@
+**Algorithm: swarm.** The agents you see are the K most recently active, not fixed neighbours. They're where the energy is. You can follow them if they're onto something good, diverge if they're all chasing the same thing, or anchor a new direction to pull others. Activity attracts activity — be deliberate about whether you're contributing to a hot spot or creating one.

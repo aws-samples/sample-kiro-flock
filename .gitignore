@@ -1,20 +1,25 @@
+# Machine-specific config
+install.config
+
+# Dependencies
 node_modules/
+
+# Build output
 dist/
 cdk.out/
+cdk.context.json
 *.js.map
-.env
-.aga.config.json
-.vscode/
-.kiro/
-.playwright-mcp/
 
-# Security scan outputs
-holmes-results/
-retire-results/
-retire.json
-retire-output.json
-retirejs-results/
-scan-results/
-security-results/
-scan-report.json
-scan-resolution.md
+# Environment / secrets
+.env
+
+# IDE
+.vscode/
+.playwright-mcp/
+.kiro/
+
+# Scratch
+.scratch/
+
+# OS
+.DS_Store

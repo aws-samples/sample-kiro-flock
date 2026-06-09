@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
+<title>kiro-flock: WeltenBuilder</title>
+<script>
+  // API Gateway serves this page at /welten (usually no trailing slash,
+  // sometimes with). Without a base href, the browser resolves relative
+  // URLs like "cluster/list" and "styles.css" against the current
+  // document path, which breaks both asset loading and API calls
+  // depending on whether a trailing slash is present.
+  //
+  // Set <base href> to the stage root so relative API calls always land
+  // on /prod/cluster/..., then inject the stylesheets and scripts with
+  // explicit /welten/ paths.
+  (function() {
+    var path = location.pathname.replace(/\/+$/, "");
+    var stageRoot = path.replace(/\/welten$/, "") + "/";
+    var weltenBase = stageRoot + "welten/";
+    var base = document.createElement("base");
+    base.href = location.origin + stageRoot;
+    document.head.appendChild(base);
+    function addCss(href) {
+      var link = document.createElement("link");
+      link.rel = "stylesheet";
+      link.href = href;
+      document.head.appendChild(link);
+    }
+    function addScript(src) {
+      var s = document.createElement("script");
+      s.src = src;
+      document.currentScript.parentNode.appendChild(s);
+    }
+    addCss(location.origin + weltenBase + "styles.css");
+    addCss(location.origin + weltenBase + "envPanel.css");
+    addCss(location.origin + weltenBase + "analyzerPanel.css");
+    addScript("https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js");
+    addScript("https://cdn.jsdelivr.net/npm/marked@15/marked.min.js");
+    addScript("https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js");
+    addCss("https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/styles/github-dark.min.css");
+    addScript("https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/highlight.min.js");
+    addScript(location.origin + weltenBase + "envPanel.js");
+    addScript(location.origin + weltenBase + "analyzerPanel.js");
+    addScript(location.origin + weltenBase + "app.js");
+  })();
+</script>
+</head>
+<body>
+
+<header class="wb-header">
+  <div class="wb-header-left">
+    <div class="wb-logo">kiro<span>-flock:</span> <span class="logo-welten">WeltenBuilder</span></div>
+    <span id="wb-poll-indicator" class="wb-poll-indicator" aria-live="polite">
+      <span class="wb-poll-text">updated just now</span>
+    </span>
+  </div>
+  <div class="wb-header-right">
+    <button class="wb-topbtn" id="btn-pause-all" disabled>Pause All</button>
+    <button class="wb-topbtn" id="btn-stop-all" disabled>Stop All</button>
+    <button class="wb-topbtn" id="btn-logout" style="display:none">Sign out</button>
+  </div>
+</header>
+
+<main class="wb-main">
+  <div class="wb-main-left">
+    <div class="wb-main-left-top">
+      <div id="cluster-stacks" class="wb-cluster-stacks"></div>
+    </div>
+    <div class="wb-analyzer-wrap" id="analyzer-container"></div>
+  </div>
+
+  <div class="wb-resize-handle" id="resize-handle"></div>
+
+  <aside class="wb-main-right" id="env-container"></aside>
+</main>
+
+<div id="toast" class="wb-toast"></div>
+
+</body>
+</html>
