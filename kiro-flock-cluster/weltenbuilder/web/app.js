@@ -803,7 +803,7 @@ function _wbBuildClusterCard(c) {
     <div class="wb-stack-config">
       <span class="wb-stack-config-item"><span class="wb-stack-config-label">agents</span> ${_wbEsc(String(concurrency))}</span>
       <span class="wb-stack-config-sep">\u00b7</span>
-      <span class="wb-stack-config-item"><span class="wb-stack-config-label">instance</span> ${_wbEsc(String(instanceType))}</span>${cfg && cfg.internetAccess ? `\n      <span class="wb-stack-config-sep">\u00b7</span>\n      <span class="wb-stack-config-item"><span class="wb-stack-config-label">\u{1F310}</span> web</span>` : ""}
+      <span class="wb-stack-config-item"><span class="wb-stack-config-label">instance</span> ${_wbEsc(String(instanceType))}</span>
     </div>
 
     <footer class="wb-stack-actions">

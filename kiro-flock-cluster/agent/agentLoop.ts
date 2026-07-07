@@ -19,7 +19,7 @@
  *
  *   Dynamic reload: the agent also reads config.json each iteration and
  *   applies the latest `loopIntervalSeconds`, `algorithm`, `swarmK`,
- *   `neighbourRadius`, and `internetAccess` to the next iteration.
+ *   and `neighbourRadius` to the next iteration.
  *   Other fields (`concurrency`, `instanceType`, `model`) require a
  *   restart because they change topology or process identity.
  *
@@ -69,8 +69,6 @@ export interface AgentLoopConfig {
   /** Cluster this agent belongs to. Prefixes config/direction/state/store
    *  keys. */
   clusterId: string;
-  /** When true, agents get a fetch MCP tool for web research. */
-  internetAccess: boolean;
   /** When true (default), the agent participates in autopause: after every
    *  agent reports `action: "idle"` for three consecutive iterations the
    *  cluster is paused with reason "autopause". */
@@ -178,7 +176,6 @@ interface DynamicConfig {
   algorithm: Algorithm | null;
   swarmK: number | null;
   neighbourRadius: number | null;
-  internetAccess: boolean | null;
   autopause: boolean | null;
 }
 
@@ -198,7 +195,6 @@ async function readDynamicConfig(
     algorithm: null,
     swarmK: null,
     neighbourRadius: null,
-    internetAccess: null,
     autopause: null,
   };
   try {
@@ -212,7 +208,6 @@ async function readDynamicConfig(
       algorithm?: unknown;
       swarmK?: unknown;
       neighbourRadius?: unknown;
-      internetAccess?: unknown;
       autopause?: unknown;
     };
 
@@ -244,7 +239,6 @@ async function readDynamicConfig(
         ? Math.floor(parsed.neighbourRadius)
         : null;
 
-    const internet = typeof parsed.internetAccess === "boolean" ? parsed.internetAccess : null;
     const auto = typeof parsed.autopause === "boolean" ? parsed.autopause : null;
 
     return {
@@ -252,7 +246,6 @@ async function readDynamicConfig(
       algorithm: algo,
       swarmK: k,
       neighbourRadius: radius,
-      internetAccess: internet,
       autopause: auto,
     };
   } catch (err: unknown) {
@@ -334,12 +327,11 @@ async function readDirective(
 
 /**
  * Load the base agent loop prompt and the algorithm fragment, substitute
- * {{ALGORITHM_GUIDANCE}} and {{INTERNET_ACCESS}}, and return the composed
- * prompt. Throws loudly if either file is missing. A misspelled algorithm
- * should crash the agent at boot, not run silently with the wrong
- * instructions.
+ * {{ALGORITHM_GUIDANCE}}, and return the composed prompt. Throws loudly if
+ * either file is missing. A misspelled algorithm should crash the agent at
+ * boot, not run silently with the wrong instructions.
  */
-function buildAgentPrompt(algorithm: Algorithm, internetAccess: boolean): string {
+function buildAgentPrompt(algorithm: Algorithm): string {
   const base = readFileSync(
     resolve(__dirname, "..", "agents", "prompts", "agent-loop.md"),
     "utf-8",
@@ -370,28 +362,7 @@ function buildAgentPrompt(algorithm: Algorithm, internetAccess: boolean): string
     );
   }
 
-  const internetFragment = internetAccess
-    ? [
-        "",
-        "## Internet research",
-        "",
-        "You have a `fetch` tool that retrieves web pages and returns their content as markdown.",
-        "Use it when your current task requires external information: documentation lookups,",
-        "API references, checking current library versions, reading specs or standards.",
-        "",
-        "Guidelines:",
-        "- Only fetch when the direction or your current subtask requires external information.",
-        "- Do not fetch speculatively on every iteration.",
-        "- Fetched content is ephemeral (not cached across iterations). If you find something",
-        "  useful, write a summary or the relevant excerpt to your environment directory so",
-        "  you and your neighbours can reference it on future iterations.",
-        "- Prefer authoritative sources (official docs, RFCs, GitHub repos) over blog posts.",
-        "",
-      ].join("\n")
-    : "";
-
-  let prompt = base.replace("{{ALGORITHM_GUIDANCE}}", fragment.trim());
-  prompt = prompt.replace("{{INTERNET_ACCESS}}", internetFragment);
+  const prompt = base.replace("{{ALGORITHM_GUIDANCE}}", fragment.trim());
   return prompt;
 }
 
@@ -425,7 +396,6 @@ export async function runLoop(config: AgentLoopConfig): Promise<void> {
   let currentAlgorithm: Algorithm = config.algorithm;
   let currentSwarmK = config.swarmK;
   let currentRadius = config.neighbourRadius;
-  let currentInternetAccess = config.internetAccess;
   let currentAutopause = config.autopause;
   let currentNeighbours = config.neighbours;
 
@@ -465,18 +435,10 @@ export async function runLoop(config: AgentLoopConfig): Promise<void> {
       ? `\n\n## Per-Agent Directive (PRIORITY — act on this)\n\nThe following directive was issued to you specifically. It takes precedence over the cluster direction where they conflict. Do NOT ignore this even if you were idle.\n\n${directive}\n`
       : "";
 
-    const agentPrompt = buildAgentPrompt(currentAlgorithm, currentInternetAccess);
+    const agentPrompt = buildAgentPrompt(currentAlgorithm);
     const initialPrompt = promptHeader + directiveBlock + "\n\n" + agentPrompt;
 
     const mcpServers: McpServerEntry[] = [s3McpServer];
-    if (currentInternetAccess) {
-      mcpServers.push({
-        name: "fetch",
-        command: "npx",
-        args: ["-y", "@modelcontextprotocol/server-fetch"],
-        env: [],
-      });
-    }
 
     const client = await KiroRunner.create({
       cwd: "/home/ec2-user/kiro-flock-workspace",
@@ -593,7 +555,6 @@ export async function runLoop(config: AgentLoopConfig): Promise<void> {
     if (next.algorithm !== null) currentAlgorithm = next.algorithm;
     if (next.swarmK !== null) currentSwarmK = next.swarmK;
     if (next.neighbourRadius !== null) currentRadius = next.neighbourRadius;
-    if (next.internetAccess !== null) currentInternetAccess = next.internetAccess;
     if (next.autopause !== null) currentAutopause = next.autopause;
 
     // 5. Re-select neighbours for the next iteration. amorphous + mesh are

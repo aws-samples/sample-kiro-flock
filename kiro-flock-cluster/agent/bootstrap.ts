@@ -35,8 +35,6 @@ interface AgentConfig {
    *  config/direction/state/store. Defaults to "cluster_0" on configs
    *  written before multi-cluster support. */
   clusterId?: string;
-  /** When true, agents get a fetch MCP tool for web research. */
-  internetAccess?: boolean;
   /** When true (default), the agent participates in autopause: cluster
    *  pauses itself after every agent reports idle for three iterations. */
   autopause?: boolean;
@@ -86,7 +84,6 @@ export default async function bootstrap(): Promise<void> {
     swarmK: cfg.swarmK,
     neighbourRadius: cfg.neighbourRadius,
     clusterId,
-    internetAccess: cfg.internetAccess ?? false,
     autopause: cfg.autopause ?? true,
   });
 }

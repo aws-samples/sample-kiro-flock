@@ -107,5 +107,3 @@ visibility into what you are doing locally. If the result of a local
 execution matters, write it back to your environment directory in S3 before
 the turn ends. Anything left only on local disk is invisible to everyone
 else and lost when the cluster stops.
-
-{{INTERNET_ACCESS}}

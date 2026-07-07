@@ -148,9 +148,6 @@ export interface ClusterConfig {
   algorithm: "amorphous" | "mesh" | "swarm";
   /** Only used when algorithm === "swarm". Must be 1..concurrency-1. */
   swarmK: number;
-  /** When true, agents get a fetch MCP tool for web research. Read-only
-   *  HTTP GET, returns pages as markdown. Default false. */
-  internetAccess: boolean;
   /** When true (default), the cluster pauses itself after every agent
    *  has reported `action: "idle"` for three consecutive iterations.
    *  Off means a forgotten cluster will keep iterating and billing. */

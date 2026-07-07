@@ -531,7 +531,6 @@ const DEFAULT_CLUSTER_CONFIG: ClusterConfig = {
   model: null,
   algorithm: "amorphous",
   swarmK: 4,
-  internetAccess: false,
   autopause: true,
 };
 

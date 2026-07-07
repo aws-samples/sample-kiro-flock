@@ -53,7 +53,6 @@ export async function startCluster(
       algorithm: config.algorithm,
       swarmK: config.swarmK,
       clusterId,
-      internetAccess: config.internetAccess,
       autopause: config.autopause,
     });
 

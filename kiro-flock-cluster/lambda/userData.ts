@@ -28,8 +28,6 @@ export interface AgentUserDataConfig {
    *  bootstrap.ts. Optional for backwards compatibility — defaults to
    *  "cluster_0" when omitted so single-cluster callers keep working. */
   clusterId?: string;
-  /** When true, agents get a fetch MCP tool for web research. */
-  internetAccess?: boolean;
   /** When true (default), agents participate in autopause: cluster
    *  pauses itself after every agent reports idle for three iterations. */
   autopause?: boolean;
@@ -62,10 +60,19 @@ dnf install -y nodejs20 || dnf install -y nodejs
 # ---- 2. kiro-cli ---------------------------------------------------------
 # The install script places binaries under ~/.local/bin. We install for
 # ec2-user so the systemd service (running as ec2-user) can find it.
+#
+# Use the musl build, not the GNU one. The GNU release requires glibc 2.39+,
+# but Amazon Linux 2023 ships glibc 2.34, so kirocli-aarch64-linux.zip fails
+# to install ("built for a GNU system with glibc 2.39 or newer"). The musl
+# build is statically linked and glibc-independent, so it runs on AL2023.
+#
+# Pinned to an exact version (not "latest") for reproducible builds — a new
+# "latest" could reintroduce the glibc break or otherwise shift under us.
+# Bump this deliberately after verifying the musl artifact resolves.
 sudo -u ec2-user bash -eux <<'KIRO_INSTALL'
 cd /tmp
 curl --proto '=https' --tlsv1.2 -sSf \\
-  'https://desktop-release.q.us-east-1.amazonaws.com/latest/kirocli-aarch64-linux.zip' \\
+  'https://desktop-release.q.us-east-1.amazonaws.com/2.11.1/kirocli-aarch64-linux-musl.zip' \\
   -o /tmp/kirocli.zip
 unzip -q -o /tmp/kirocli.zip -d /tmp
 yes | /tmp/kirocli/install.sh || /tmp/kirocli/install.sh --no-confirm || true

@@ -49,7 +49,6 @@ export const TOOLS = [
             neighbourRadius: { type: "number", description: "How many neighbours each agent reads" },
             instanceType: { type: "string", description: "EC2 instance type (Graviton only, e.g. t4g.medium)" },
             loopIntervalSeconds: { type: "number", description: "Seconds between agent iterations" },
-            internetAccess: { type: "boolean", description: "When true, agents get a fetch tool for web research" },
           },
         },
       },
@@ -95,7 +94,7 @@ export const TOOLS = [
   {
     name: "cluster_config_get",
     description:
-      "Get the current cluster configuration (concurrency, neighbourRadius, instanceType, loopIntervalSeconds, algorithm, swarmK, internetAccess, autopause).",
+      "Get the current cluster configuration (concurrency, neighbourRadius, instanceType, loopIntervalSeconds, algorithm, swarmK, autopause).",
     inputSchema: {
       type: "object",
       properties: {
@@ -129,10 +128,6 @@ export const TOOLS = [
             swarmK: {
               type: "number",
               description: "Peer count for swarm algorithm. 1..concurrency-1. Ignored for other algorithms.",
-            },
-            internetAccess: {
-              type: "boolean",
-              description: "When true, agents get a fetch MCP tool for web research (read-only HTTP GET, returns pages as markdown). Applies on next cluster start.",
             },
           },
         },

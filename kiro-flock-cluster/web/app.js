@@ -275,7 +275,6 @@ function hasConfigDrift() {
   if (form.concurrency !== savedConfig.concurrency) return true;
   if (form.loopIntervalSeconds !== savedConfig.loopIntervalSeconds) return true;
   if (form.instanceType !== savedConfig.instanceType) return true;
-  if (form.internetAccess !== savedConfig.internetAccess) return true;
   if (form.autopause !== savedConfig.autopause) return true;
   if (form.algorithm === "amorphous" && form.neighbourRadius !== savedConfig.neighbourRadius) return true;
   if (form.algorithm === "swarm" && form.swarmK !== savedConfig.swarmK) return true;
@@ -323,7 +322,6 @@ function readConfigForm() {
     instanceType: document.getElementById("in-instance").value || "t4g.medium",
     neighbourRadius: parseInt(document.getElementById("in-neighbours").value) || 0,
     swarmK: parseInt(document.getElementById("in-swarmk").value) || 4,
-    internetAccess: document.getElementById("in-internet").checked,
     autopause: document.getElementById("in-autopause").checked,
   };
 }
@@ -360,7 +358,6 @@ function applyServerConfig(cfg) {
     }
   }
   if (cfg.algorithm) applyAlgorithmUI(cfg.algorithm);
-  document.getElementById("in-internet").checked = !!cfg.internetAccess;
   // autopause defaults on for older configs that predate the field.
   document.getElementById("in-autopause").checked = cfg.autopause !== false;
   savedConfig = {
@@ -370,7 +367,6 @@ function applyServerConfig(cfg) {
     instanceType: cfg.instanceType ?? "t4g.medium",
     neighbourRadius: cfg.neighbourRadius ?? 1,
     swarmK: cfg.swarmK ?? 4,
-    internetAccess: !!cfg.internetAccess,
     autopause: cfg.autopause !== false,
   };
   checkCapacity();
@@ -561,8 +557,6 @@ document.addEventListener("DOMContentLoaded", () => {
   });
   const inst = document.getElementById("in-instance");
   if (inst) inst.addEventListener("change", syncSaveBtn);
-  const internet = document.getElementById("in-internet");
-  if (internet) internet.addEventListener("change", syncSaveBtn);
   // autopause has its own onchange that may revert the value via a
   // confirm dialog; syncSaveBtn fires inside onAutopauseToggle().
 });

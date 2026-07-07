@@ -23,8 +23,6 @@ const DEFAULT_CONFIG = {
   algorithm: 'amorphous' as 'amorphous' | 'mesh' | 'swarm',
   // Only used when algorithm === "swarm". Must be 1..concurrency-1.
   swarmK: 4,
-  // When true, agents get a fetch MCP tool for web research.
-  internetAccess: false,
   // When true (default), the cluster pauses itself after every agent
   // reports `action: "idle"` for three consecutive iterations. Off lets a
   // forgotten cluster keep iterating and billing.
