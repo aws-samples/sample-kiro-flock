@@ -18,21 +18,34 @@
  *   PUT  /cluster/config/{cluster_id}         - merge partial update into config
  *   GET  /cluster/habitat/{cluster_id}        - list files this cluster's agents wrote to environment/{cluster_id}/
  *   GET  /cluster/habitat/file/{cluster_id}   - read a single environment file by key (cross-cluster reads allowed)
+ *   GET  /cluster/env-list/{cluster_id}       - paged listing scoped to environment/{cluster_id}/ (optional inline bodies)
+ *   PUT  /cluster/env-put/{cluster_id}        - write one object under environment/{cluster_id}/queue/ (optional if-none-match)
+ *   POST /cluster/env-delete/{cluster_id}     - delete up to 100 objects under environment/{cluster_id}/queue/
  *   GET  /cluster/direction/{cluster_id}      - read the operator's goal document
  *   PUT  /cluster/direction/{cluster_id}      - update the goal document
+ *   GET  /cluster/agent-stream/{cluster_id}   - ?agentIndex=N&kind=console|acp[&sessionId=ID] — SSM tail of an agent's journald console or an ACP session (active by default, or a specific past iteration via sessionId). kind=acp-list returns the iteration/session list instead.
+ *   GET  /cluster/agent-costs/{cluster_id}    - ?agentIndex=N — per-iteration credit spend entries + lifetime total from agent-N.costs.ndjson
+ *   GET  /cluster/dashboard/runs/{cluster_id} - run selector list (current + archived) for the dashboard drill-down
+ *   GET  /cluster/dashboard/{cluster_id}      - ?run=<runId> — per-run drill-down data (dashboard/{clusterId}/{runId}.json cache)
+ *   GET  /cluster/dashboard/overview          - fleet-level dashboard aggregate (dashboard/overview.json cache)
  *
  * Global routes (no cluster_id):
  *   GET  /cluster/knowledge-base              - list shared knowledge-base files
  *   GET  /cluster/knowledge-base/file         - read a single knowledge-base file
  *   GET  /cluster/instance-types              - available Graviton types + account vCPU quota
+ *   GET  /cluster/models                      - model catalog baked by install.sh (kiro-cli --list-models)
  *
  * Multi-cluster routes (WeltenBuilder):
  *   GET    /cluster/list                       - list registered clusters with live state
  *   DELETE /cluster/delete/{cluster_id}        - unregister a stopped cluster (preserves S3 data)
  *   POST   /cluster/stop-all                   - terminate every non-stopped cluster
  *   POST   /cluster/pause-all                  - pause every running cluster
- *   POST   /cluster/clean-env/{cluster_id}     - wipe environment/{cluster_id}/ (requires stopped)
- *   POST   /cluster/clean-env-all              - wipe environment/ entirely (requires all stopped)
+ *   POST   /cluster/resume-all                 - resume every paused cluster
+ *   POST   /cluster/clean-env/{cluster_id}     - archive environment/{cluster_id}/ to history/ (requires stopped)
+ *   POST   /cluster/clean-env-all              - archive environment/ entirely to history/ (requires all stopped)
+ *   POST   /cluster/clean-env-folder           - archive one top-level environment/<name>/ folder to history/
+ *   POST   /cluster/delete-env-folder          - permanently delete one top-level environment/<name>/ folder (no history copy)
+ *   POST   /cluster/delete-env-all             - permanently delete environment/ entirely (requires all stopped, no history copy)
  */
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import {
@@ -48,7 +61,6 @@ import {
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import {
   EC2Client,
-  DescribeInstancesCommand,
   DescribeInstanceTypesCommand,
 } from "@aws-sdk/client-ec2";
 import { LambdaClient, InvokeCommand } from "@aws-sdk/client-lambda";
@@ -67,12 +79,29 @@ import {
   writeRegistry,
   readState,
   writeState,
+  appendTransition,
   type ClusterEntry,
   type ClusterRegistry,
   type ClusterStateValue,
   type ClusterStateDoc,
 } from "./s3Store";
-import { startCluster, stopCluster } from "./ec2Manager";
+import { loadPricingCatalog, perAgentHourlyRate } from "./pricing";
+import { deriveRunManifest, earliestTs, parseRunIdTimestamp, parseTransitions } from "./dashboardCore";
+import { getComputeManager, computeTypeOf, type ComputeType } from "./computeManager";
+import * as deploymentService from "./deploymentService";
+import { handleMetrics, handleLayout, handleStatusReport, handleStackInfo, handleDestroy } from "./forgeHandler";
+import { fetchAgentStream, listAgentSessions, SESSION_ID_RE } from "./agentStream";
+import {
+  scopedKey,
+  relativeKey,
+  clampLimit,
+  parseInline,
+  parsePutBody,
+  parseDeleteBody,
+  contentTypeFor,
+  INLINE_MAX_BYTES,
+  INLINE_TOTAL_BYTES,
+} from "./envQueue";
 
 // Module-scoped AWS SDK clients. The Node SDK reuses underlying TCP
 // sockets across calls on a single client instance, so hoisting these
@@ -86,14 +115,15 @@ const lambdaClient = new LambdaClient({});
 const serviceQuotas = new ServiceQuotasClient({});
 
 // Environment variables set by the CDK stack. Captured at module load.
+// Compute-backend specifics (AMI, security group, instance profile,
+// subnets, ECS cluster/taskdef) are read from the env inside
+// computeManager.ts / ec2Manager.ts / ecsManager.ts — the handler only
+// dispatches on the cluster's configured computeType.
 const BUCKET = process.env.BUCKET_NAME!;
-const AMI_ID = process.env.AMI_ID!;
-const SG_ID = process.env.SECURITY_GROUP_ID!;
-const INSTANCE_PROFILE = process.env.INSTANCE_PROFILE_ARN!;
-const SUBNET_ID = process.env.SUBNET_ID!;
 const CONCURRENCY_CAP = parseInt(process.env.CONCURRENCY_CAP ?? "64", 10);
 const SNAPSHOT_BUILDER_FN = process.env.SNAPSHOT_BUILDER_FN ?? "";
 const ANALYSIS_BUILDER_FN = process.env.ANALYSIS_BUILDER_FN ?? "";
+const DASHBOARD_BUILDER_FN = process.env.DASHBOARD_BUILDER_FN ?? "";
 
 // Snapshot is considered fresh for this many milliseconds. Beyond this
 // the handler returns the stale snapshot and fires a rebuild so the next
@@ -110,6 +140,11 @@ const ANALYSIS_PRESIGN_EXPIRY_S = 900;
 const ANALYSIS_POLL_MS = 20_000;
 const ANALYSIS_POLL_STEP_MS = 1000;
 const ANALYSIS_RETRY_AFTER_S = 15;
+
+// Dashboard caches (overview + current-run drill-down) are served
+// stale-while-revalidate: older than this fires an async rebuild while
+// the stale doc is returned. Archived runs are immutable — never rebuilt.
+const DASHBOARD_STALE_MS = 60_000;
 
 // ---- Cluster key prefix helpers ---------------------------------------------
 // `clusterPrefix`, `envPrefix`, `DEFAULT_CLUSTER_ID`, `readClusterConfig`,
@@ -129,12 +164,14 @@ const snapshotKey = (clusterId: string) => `${clusterPrefix(clusterId)}${SNAPSHO
 const analysisPointerKey = (clusterId: string) => `${clusterPrefix(clusterId)}${ANALYSIS_POINTER_SUFFIX}`;
 
 /** Write a fresh state.json, unconditionally. Used by every operator-
- *  initiated route (start, stop, pause, resume, stop-all, pause-all).
+ *  initiated route (start, stop, pause, resume, stop-all, pause-all,
+ *  resume-all).
  *  Operator intent always wins, so no If-Match precondition. */
 async function setOperatorState(
   clusterId: string,
   state: ClusterStateValue,
   reason: string,
+  lastError?: { code: string; message: string; at: string } | null,
 ): Promise<void> {
   const doc: ClusterStateDoc = {
     state,
@@ -142,7 +179,21 @@ async function setOperatorState(
     transitionedBy: "operator",
     reason,
   };
+  // Only attach lastError when explicitly provided. Every normal transition
+  // (start/stop/pause/resume) omits it, so the field is naturally absent and
+  // reads back as null — which is how a successful start clears a prior
+  // launch failure (the "starting" write that precedes a launch wipes it).
+  if (lastError !== undefined) doc.lastError = lastError;
   await writeState(BUCKET, clusterId, doc);
+  // Mirror the transition into the append-only transitions log for the
+  // dashboard's lifecycle band. Best-effort by design (appendTransition
+  // never throws) — the state transition itself is already committed.
+  await appendTransition(BUCKET, clusterId, {
+    ts: doc.transitionedAt,
+    state: doc.state,
+    by: doc.transitionedBy,
+    reason,
+  });
 }
 
 // ---- Route parsing -----------------------------------------------------------
@@ -176,10 +227,31 @@ export function parseRoute(path: string): { action: string; clusterId: string } 
     // for URL shape consistency but ignored by the handler.
     return { action: "knowledge-base/file", clusterId: segments[2] || DEFAULT_CLUSTER_ID };
   }
+  // dashboard/* — multi-segment dashboard routes (4.7 dashboarding).
+  //   dashboard/runs/{cluster_id}  → run selector list for one cluster
+  //   dashboard/overview           → fleet-level aggregate (no cluster_id)
+  //   dashboard/{cluster_id}       → per-run drill-down (?run=<runId>)
+  if (segments[0] === "dashboard") {
+    if (segments[1] === "runs") {
+      return { action: "dashboard/runs", clusterId: segments[2] || DEFAULT_CLUSTER_ID };
+    }
+    if (segments[1] === "overview") {
+      return { action: "dashboard/overview", clusterId: DEFAULT_CLUSTER_ID };
+    }
+    return { action: "dashboard", clusterId: segments[1] || DEFAULT_CLUSTER_ID };
+  }
+
   // analyzer-tab/{tabId} — the tabId goes into the clusterId slot for
   // consistency with the suffix-style routing pattern.
   if (segments[0] === "analyzer-tab") {
     return { action: "analyzer-tab", clusterId: segments[1] || DEFAULT_CLUSTER_ID };
+  }
+
+  // deploy/* — deploy routes. The optional cluster_id suffix sits after the
+  // full action path. Only deploy/records remains: runtime approvals were
+  // replaced by config-time trust (trustDeploy).
+  if (segments[0] === "deploy") {
+    return { action: `deploy/${segments[1] || ""}`, clusterId: segments[2] || DEFAULT_CLUSTER_ID };
   }
 
   return { action: segments[0], clusterId: segments[1] || DEFAULT_CLUSTER_ID };
@@ -228,6 +300,27 @@ async function triggerAnalysisBuild(clusterId: string): Promise<void> {
   }
 }
 
+/** Fire-and-forget async invoke of the dashboard builder. The payload is
+ *  either { target: "overview" } or { target: "cluster", clusterId, runId }
+ *  — dashboardBuilder.ts scopes its S3 reads/writes accordingly. */
+async function triggerDashboardBuild(
+  payload: { target: "overview" } | { target: "cluster"; clusterId: string; runId: string },
+): Promise<void> {
+  if (!DASHBOARD_BUILDER_FN) {
+    console.warn("DASHBOARD_BUILDER_FN not set; skipping builder invoke");
+    return;
+  }
+  try {
+    await lambdaClient.send(new InvokeCommand({
+      FunctionName: DASHBOARD_BUILDER_FN,
+      InvocationType: "Event",
+      Payload: Buffer.from(JSON.stringify(payload)),
+    }));
+  } catch (err: unknown) {
+    console.error("dashboard builder invoke failed:", err instanceof Error ? err.message : err);
+  }
+}
+
 /** Read the analysis pointer for a given cluster. Returns null if absent. */
 async function readAnalysisPointer(
   clusterId: string,
@@ -253,7 +346,7 @@ async function presignAnalysisUrl(key: string): Promise<string> {
  *  "stopped" if the file is absent or unreadable — both mean "no live
  *  cluster" for the purposes of guard checks (stop-before-delete,
  *  stopped-before-pause, etc.). The file is written by every operator
- *  route (start/stop/pause/resume/stop-all/pause-all) and by agents on
+ *  route (start/stop/pause/resume/stop-all/pause-all/resume-all) and by agents on
  *  the Starting → Running and Running → Paused (autopause) transitions. */
 async function readClusterState(clusterId: string): Promise<ClusterStateValue> {
   const { doc } = await readState(BUCKET, clusterId);
@@ -273,23 +366,42 @@ async function readClusterState(clusterId: string): Promise<ClusterStateValue> {
  */
 async function readSnapshotForList(clusterId: string): Promise<{
   lastUpdate: { agentId: string; ts: string; action: string; iteration: number } | null;
+  hasAnyDirective: boolean;
+  modelOverrideCount: number;
   lastBuiltMs: number | null;
+  totalCredits: number | null;
+  infraCostUsd: number | null;
 }> {
+  const empty = {
+    lastUpdate: null,
+    hasAnyDirective: false,
+    modelOverrideCount: 0,
+    lastBuiltMs: null,
+    totalCredits: null,
+    infraCostUsd: null,
+  };
   try {
     const resp = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: snapshotKey(clusterId) }));
     const text = (await resp.Body?.transformToString()) ?? "";
-    if (!text) return { lastUpdate: null, lastBuiltMs: null };
+    if (!text) return empty;
     const snap = JSON.parse(text) as {
       lastBuilt?: unknown;
+      hasAnyDirective?: unknown;
+      totalCredits?: unknown;
+      infraCostUsd?: unknown;
+      config?: { models?: unknown } | null;
       agents?: Array<{
         agentId?: unknown;
         lastEntry?: { action?: unknown; iteration?: unknown } | null;
         lastUpdatedTs?: unknown;
+        hasDirective?: unknown;
       }>;
     };
     let bestTs = 0;
     let best: { agentId: string; ts: string; action: string; iteration: number } | null = null;
+    let anyDirective = false;
     for (const a of snap.agents ?? []) {
+      if (a.hasDirective === true) anyDirective = true;
       if (!a.lastEntry || typeof a.lastUpdatedTs !== "string" || typeof a.agentId !== "string") continue;
       const t = new Date(a.lastUpdatedTs).getTime();
       if (!Number.isFinite(t) || t <= bestTs) continue;
@@ -298,15 +410,136 @@ async function readSnapshotForList(clusterId: string): Promise<{
       bestTs = t;
       best = { agentId: a.agentId, ts: a.lastUpdatedTs, action, iteration: iter };
     }
+    // Snapshot may have a top-level summary flag; trust it over the
+    // per-agent scan only when present (older snapshots predate it).
+    const hasAnyDirective = typeof snap.hasAnyDirective === "boolean"
+      ? snap.hasAnyDirective
+      : anyDirective;
     const lastBuiltMs = typeof snap.lastBuilt === "string"
       ? (Number.isFinite(new Date(snap.lastBuilt).getTime()) ? new Date(snap.lastBuilt).getTime() : null)
       : null;
-    return { lastUpdate: best, lastBuiltMs };
+    const totalCredits = typeof snap.totalCredits === "number" && Number.isFinite(snap.totalCredits)
+      ? snap.totalCredits
+      : null;
+    const infraCostUsd = typeof snap.infraCostUsd === "number" && Number.isFinite(snap.infraCostUsd)
+      ? snap.infraCostUsd
+      : null;
+    // How many agents run a model other than the cluster baseline. Derived
+    // from the config the snapshot already embeds verbatim, so there is no
+    // separate builder field that could drift out of step with it.
+    const rawModels = snap.config?.models;
+    const modelOverrideCount =
+      rawModels && typeof rawModels === "object" && !Array.isArray(rawModels)
+        ? Object.keys(rawModels as Record<string, unknown>).filter(k => /^\d+$/.test(k)).length
+        : 0;
+    return { lastUpdate: best, hasAnyDirective, modelOverrideCount, lastBuiltMs, totalCredits, infraCostUsd };
   } catch (err: unknown) {
-    if ((err as { name?: string }).name === "NoSuchKey") return { lastUpdate: null, lastBuiltMs: null };
+    if ((err as { name?: string }).name === "NoSuchKey") return empty;
     const message = err instanceof Error ? err.message : String(err);
     console.warn(`readSnapshotForList[${clusterId}] failed: ${message}`);
-    return { lastUpdate: null, lastBuiltMs: null };
+    return empty;
+  }
+}
+
+/** GetObject as string for run.json derivation; "" when the key is absent. */
+async function getTextOrEmpty(key: string): Promise<string> {
+  try {
+    const res = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: key }));
+    return (await res.Body?.transformToString()) ?? "";
+  } catch (err: unknown) {
+    if ((err as { name?: string }).name === "NoSuchKey") return "";
+    throw err;
+  }
+}
+
+/** Count the objects under an S3 prefix (paged), skipping folder markers. */
+async function countPrefix(prefix: string): Promise<number> {
+  let count = 0;
+  let token: string | undefined;
+  do {
+    const listed = await s3.send(new ListObjectsV2Command({
+      Bucket: BUCKET, Prefix: prefix, ContinuationToken: token,
+    }));
+    count += (listed.Contents ?? []).filter(o => o.Key && !o.Key.endsWith("/")).length;
+    token = listed.IsTruncated ? listed.NextContinuationToken : undefined;
+  } while (token);
+  return count;
+}
+
+/**
+ * Write `history/<ts>/run.json` after an archive sweep (contract:
+ * docs/dashboard-api.md "Backend storage"). Reads each archived
+ * agent-N.ndjson once from its history/ destination (a GetObject per
+ * agent file is acceptable at archive time), takes the last line of each
+ * agent-N.costs.ndjson for credit totals, and derives startedAt from the
+ * archived transitions log (earliest agent log ts as fallback).
+ *
+ * `envFileCount` is the number of environment files archived alongside
+ * the store (clean-env path). Pass null for store-only archives — the
+ * cluster's LIVE environment subfolder is counted instead, since the env
+ * stays in place across store-only sweeps.
+ *
+ * Best-effort by design: a manifest failure is logged and swallowed so
+ * the archive itself (already complete) is never rolled back or failed.
+ */
+async function writeRunManifest(
+  clusterId: string,
+  archivePrefix: string,
+  archivedSourceKeys: string[],
+  envFileCount: number | null,
+  logTag: string,
+): Promise<void> {
+  try {
+    const runId = archivePrefix.slice("history/".length).replace(/\/$/, "");
+    const endedAt = new Date().toISOString();
+    const destKeys = archivedSourceKeys.map(k => archivePrefix + k);
+    const agentLogKeys = destKeys.filter(k => /\/agent-\d+\.ndjson$/.test(k));
+    const costKeys = destKeys.filter(k => /\/agent-\d+\.costs\.ndjson$/.test(k));
+    const transitionsDestKey = destKeys.find(k => k.endsWith("/transitions.ndjson")) ?? null;
+
+    let config: ClusterConfig | null = null;
+    try {
+      config = await readClusterConfig(BUCKET, clusterId);
+    } catch { /* never started / cleaned — manifest carries null config */ }
+
+    const [agentLogTexts, costLogTexts, transitionsText, pricing, files] = await Promise.all([
+      Promise.all(agentLogKeys.map(getTextOrEmpty)),
+      Promise.all(costKeys.map(getTextOrEmpty)),
+      transitionsDestKey ? getTextOrEmpty(transitionsDestKey) : Promise.resolve(""),
+      loadPricingCatalog(s3, BUCKET),
+      envFileCount !== null
+        ? Promise.resolve(envFileCount)
+        : countPrefix(envPrefix(clusterId, config?.everforgeGroup ?? null)),
+    ]);
+
+    const derived = deriveRunManifest({
+      agentLogTexts,
+      costLogTexts,
+      transitionsText: transitionsText || null,
+      fileCount: files,
+      endedAt,
+      hourlyRatePerAgent: perAgentHourlyRate(pricing, config),
+    });
+
+    const manifest = {
+      clusterId,
+      runId,
+      startedAt: derived.startedAt,
+      endedAt,
+      config,
+      totals: derived.totals,
+      agents: derived.agents,
+    };
+    await s3.send(new PutObjectCommand({
+      Bucket: BUCKET,
+      Key: `${archivePrefix}run.json`,
+      Body: JSON.stringify(manifest),
+      ContentType: "application/json",
+    }));
+    console.log(`${logTag}: wrote ${archivePrefix}run.json (${derived.agents} agents, ${derived.totals.iterations} iterations)`);
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(`${logTag}: run.json write failed (best-effort, archive is intact): ${message}`);
   }
 }
 
@@ -326,26 +559,32 @@ async function archiveClusterToHistory(clusterId: string, logTag: string): Promi
   const storeSubfolder = `${clusterPrefix(clusterId)}store/`;
   const stateKey = stateFileKeyFor(clusterId);
   const envSnapshotKey = `${storeSubfolder}cluster-snapshot.json`;
-  const [envObjs, storeObjs] = await Promise.all([
-    s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: envSubfolder })),
-    s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: storeSubfolder })),
+  const [envKeys, storeKeys] = await Promise.all([
+    listAllKeys(envSubfolder),
+    listAllKeys(storeSubfolder),
   ]);
   const toArchive = [
-    ...(envObjs.Contents ?? []).filter(o => o.Key && o.Key !== envSubfolder),
-    ...(storeObjs.Contents ?? []).filter(o => o.Key
-      && o.Key !== storeSubfolder
-      && o.Key !== stateKey
-      && o.Key !== envSnapshotKey),
+    ...envKeys.filter(k => k !== envSubfolder),
+    ...storeKeys.filter(k => k !== storeSubfolder
+      && k !== stateKey
+      && k !== envSnapshotKey),
   ];
   if (toArchive.length === 0) return 0;
   const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
   const archivePrefix = `history/${ts}/`;
   console.log(`${logTag}: archiving ${toArchive.length} files to ${archivePrefix}`);
-  await Promise.all(toArchive.map(async obj => {
-    const destKey = archivePrefix + obj.Key!;
-    await s3.send(new CopyObjectCommand({ Bucket: BUCKET, CopySource: `${BUCKET}/${obj.Key}`, Key: destKey }));
-    await s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: obj.Key! }));
-  }));
+  await copyThenDeleteKeys(toArchive, key => archivePrefix + key);
+  // Run manifest for the dashboard. The env files were archived in this
+  // sweep, so their count is known without another LIST.
+  const envArchivedCount = envKeys
+    .filter(k => k !== envSubfolder && !k.endsWith("/")).length;
+  await writeRunManifest(
+    clusterId,
+    archivePrefix,
+    toArchive,
+    envArchivedCount,
+    logTag,
+  );
   return toArchive.length;
 }
 
@@ -358,20 +597,24 @@ async function archiveStoreToHistory(clusterId: string, logTag: string): Promise
   const storeSubfolder = `${clusterPrefix(clusterId)}store/`;
   const stateKey = stateFileKeyFor(clusterId);
   const envSnapshotKey = `${storeSubfolder}cluster-snapshot.json`;
-  const storeObjs = await s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: storeSubfolder }));
-  const toArchive = (storeObjs.Contents ?? []).filter(o => o.Key
-    && o.Key !== storeSubfolder
-    && o.Key !== stateKey
-    && o.Key !== envSnapshotKey);
+  const storeKeys = await listAllKeys(storeSubfolder);
+  const toArchive = storeKeys.filter(k => k !== storeSubfolder
+    && k !== stateKey
+    && k !== envSnapshotKey);
   if (toArchive.length === 0) return 0;
   const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
   const archivePrefix = `history/${ts}/`;
   console.log(`${logTag}: archiving ${toArchive.length} store files to ${archivePrefix}`);
-  await Promise.all(toArchive.map(async obj => {
-    const destKey = archivePrefix + obj.Key!;
-    await s3.send(new CopyObjectCommand({ Bucket: BUCKET, CopySource: `${BUCKET}/${obj.Key}`, Key: destKey }));
-    await s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: obj.Key! }));
-  }));
+  await copyThenDeleteKeys(toArchive, key => archivePrefix + key);
+  // Run manifest for the dashboard. Store-only sweep — the environment
+  // stays in place, so the cluster's live env subfolder is counted.
+  await writeRunManifest(
+    clusterId,
+    archivePrefix,
+    toArchive,
+    null,
+    logTag,
+  );
   return toArchive.length;
 }
 
@@ -389,21 +632,16 @@ function stateFileKeyFor(clusterId: string): string {
  * preserving `store/analyzer/` which is actively used by the analyzer feature.
  */
 async function archiveLegacyStore(logTag: string): Promise<number> {
-  const storeObjs = await s3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix: "store/" }));
-  const toArchive = (storeObjs.Contents ?? []).filter(o =>
-    o.Key
-    && !o.Key.startsWith("store/analyzer/")
-    && o.Key !== "store/"
+  const storeKeys = await listAllKeys("store/");
+  const toArchive = storeKeys.filter(k =>
+    !k.startsWith("store/analyzer/")
+    && k !== "store/"
   );
   if (toArchive.length === 0) return 0;
   const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
   const archivePrefix = `history/${ts}/legacy-store/`;
   console.log(`${logTag}: archiving ${toArchive.length} legacy store/ files to ${archivePrefix}`);
-  await Promise.all(toArchive.map(async obj => {
-    const destKey = archivePrefix + obj.Key!;
-    await s3.send(new CopyObjectCommand({ Bucket: BUCKET, CopySource: `${BUCKET}/${obj.Key}`, Key: destKey }));
-    await s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: obj.Key! }));
-  }));
+  await copyThenDeleteKeys(toArchive, key => archivePrefix + key);
   return toArchive.length;
 }
 
@@ -436,6 +674,74 @@ async function deletePrefix(prefix: string): Promise<number> {
   return deleted;
 }
 
+/**
+ * List every object key under an S3 prefix, following continuation tokens.
+ * ListObjectsV2 caps at 1000 keys per page; Everforge project trees (with
+ * agent-uploaded node_modules) routinely exceed that, so every archive
+ * helper must paginate or it silently leaves files behind.
+ */
+async function listAllKeys(prefix: string): Promise<string[]> {
+  const keys: string[] = [];
+  let token: string | undefined;
+  do {
+    const listed = await s3.send(new ListObjectsV2Command({
+      Bucket: BUCKET, Prefix: prefix, ContinuationToken: token,
+    }));
+    for (const o of listed.Contents ?? []) {
+      if (o.Key) keys.push(o.Key);
+    }
+    token = listed.IsTruncated ? listed.NextContinuationToken : undefined;
+  } while (token);
+  return keys;
+}
+
+/**
+ * Bounded concurrency for the archive copy fan-out. Serial copies blow
+ * past the API Gateway 29s response limit on large folders (1500 files
+ * ≈ 60-100s serial); unbounded Promise.all over thousands of keys risks
+ * S3 throttling. ~30 workers archives a 1500-file tree in a few seconds.
+ */
+const ARCHIVE_COPY_CONCURRENCY = 30;
+
+/**
+ * Copy `keys` to their mapped destination with a bounded worker pool,
+ * then batch-delete the originals (DeleteObjects, 1000 per call).
+ * Copy-all-then-delete-all: originals are only removed after every copy
+ * succeeded, so a mid-flight failure never loses data.
+ */
+async function copyThenDeleteKeys(keys: string[], destFor: (key: string) => string): Promise<void> {
+  let next = 0;
+  const workers = Array.from({ length: Math.min(ARCHIVE_COPY_CONCURRENCY, keys.length) }, async () => {
+    while (next < keys.length) {
+      const key = keys[next++];
+      await s3.send(new CopyObjectCommand({
+        Bucket: BUCKET,
+        CopySource: `${BUCKET}/${encodeURIComponent(key).replace(/%2F/g, "/")}`,
+        Key: destFor(key),
+      }));
+    }
+  });
+  await Promise.all(workers);
+  for (let i = 0; i < keys.length; i += 1000) {
+    const chunk = keys.slice(i, i + 1000);
+    await s3.send(new DeleteObjectsCommand({
+      Bucket: BUCKET,
+      Delete: { Objects: chunk.map((k) => ({ Key: k })), Quiet: true },
+    }));
+  }
+}
+
+/**
+ * Copy all objects under `srcPrefix` to `dstPrefix`, then delete the originals.
+ * Used by the per-folder clean endpoint to archive individual environment folders.
+ */
+async function copyAndDeletePrefix(srcPrefix: string, dstPrefix: string): Promise<number> {
+  const keys = await listAllKeys(srcPrefix);
+  if (keys.length === 0) return 0;
+  await copyThenDeleteKeys(keys, (key) => dstPrefix + key.slice(srcPrefix.length));
+  return keys.length;
+}
+
 /** Wrap a value in an API Gateway JSON response. */
 function json(statusCode: number, body: unknown): APIGatewayProxyResult {
   return { statusCode, headers: { "content-type": "application/json" }, body: JSON.stringify(body) };
@@ -449,21 +755,193 @@ function getBody(event: APIGatewayProxyEvent): string | null {
 }
 
 /**
+ * Model catalog. The list of models the deployment's kiro-cli knows about,
+ * baked into s3://BUCKET/config/models.json by install.sh (via
+ * `kiro-cli --list-models`). Neither the browser nor this Lambda can run
+ * kiro-cli, so this file is the single source of truth for the dashboard's
+ * model picker and for validating a chosen model. No model ids are hardcoded
+ * anywhere in this file — the allowed set comes entirely from the catalog.
+ *
+ * Cached in the warm container for a short TTL so a freshly-baked catalog is
+ * picked up without waiting for the container to recycle, while repeated
+ * validations don't hit S3 on every call.
+ */
+interface ModelCatalog {
+  models: Array<{
+    model_id: string;
+    model_name?: string;
+    description?: string;
+    context_window_tokens?: number;
+    [k: string]: unknown;
+  }>;
+  default_model?: string | null;
+  [k: string]: unknown;
+}
+
+const MODEL_CATALOG_KEY = "config/models.json";
+const MODEL_CATALOG_TTL_MS = 5 * 60 * 1000;
+let modelCatalogCache: { at: number; catalog: ModelCatalog | null } | null = null;
+
+async function loadModelCatalog(): Promise<ModelCatalog | null> {
+  const now = Date.now();
+  if (modelCatalogCache && now - modelCatalogCache.at < MODEL_CATALOG_TTL_MS) {
+    return modelCatalogCache.catalog;
+  }
+  let catalog: ModelCatalog | null = null;
+  try {
+    const resp = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: MODEL_CATALOG_KEY }));
+    const text = (await resp.Body?.transformToString()) ?? "";
+    if (text) {
+      const parsed = JSON.parse(text) as ModelCatalog;
+      if (parsed && Array.isArray(parsed.models)) catalog = parsed;
+    }
+  } catch (err: unknown) {
+    // A missing catalog (old deployment, or install.sh skipped the step) is
+    // not fatal: validation falls back to a permissive charset check.
+    if ((err as { name?: string }).name !== "NoSuchKey") {
+      console.warn("loadModelCatalog: failed to read", MODEL_CATALOG_KEY, err);
+    }
+  }
+  modelCatalogCache = { at: now, catalog };
+  return catalog;
+}
+
+/** Valid model ids from the catalog, or null when the catalog is unavailable. */
+function catalogModelIds(catalog: ModelCatalog | null): Set<string> | null {
+  if (!catalog || !Array.isArray(catalog.models) || catalog.models.length === 0) return null;
+  const ids = catalog.models
+    .map(m => m.model_id)
+    .filter((id): id is string => typeof id === "string" && id.length > 0);
+  return ids.length > 0 ? new Set(ids) : null;
+}
+
+/**
+ * Validate the chosen agent model. `null` means "use kiro-cli's own default"
+ * (the `--model` flag is omitted at launch). A non-null value must be a model
+ * id present in the deployment catalog; when the catalog is unavailable we
+ * fall back to a safe-charset check so selection still works and the agent's
+ * own kiro-cli remains the final arbiter. On an unknown model the valid set
+ * is returned so the caller (dashboard or MCP agent) gets immediate feedback.
+ */
+function validateModel(
+  model: unknown,
+  allowed: Set<string> | null,
+): { error: string; validModels?: string[] } | null {
+  if (model === null || model === undefined) return null;
+  if (typeof model !== "string" || model.length === 0) {
+    return { error: "model must be a non-empty string or null" };
+  }
+  if (allowed && allowed.size > 0) {
+    if (!allowed.has(model)) {
+      return {
+        error: `model "${model}" is not in the deployment model catalog`,
+        validModels: [...allowed],
+      };
+    }
+    return null;
+  }
+  // Permissive fallback: catalog unavailable. Guard against garbage/injection
+  // without blocking a model a newer agent-side kiro-cli may support.
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(model)) {
+    return { error: "model must be alphanumeric with '.', '_' or '-' (max 64 chars), or null" };
+  }
+  return null;
+}
+
+/**
+ * Validate the cluster-wide `model` plus every entry of the per-agent
+ * `models` override map in a single pass.
+ *
+ * Deliberately reports EVERY bad id at once rather than returning on the
+ * first. A caller setting overrides for several agents would otherwise have
+ * to fix one id, retry, discover the next, and retry again — one round trip
+ * per mistake. The `validModels` set is attached whenever the catalog is
+ * available so the caller can correct all of them in one go.
+ *
+ * Keys must be non-negative integers. Keys at or beyond `concurrency` are
+ * accepted and round-trip unused (like a stale `swarmK` under a non-swarm
+ * algorithm), so overrides can be staged before scaling the cluster up.
+ */
+function validateModelSelection(
+  config: ClusterConfig,
+  allowed: Set<string> | null,
+): { error: string; validModels?: string[] } | null {
+  const problems: string[] = [];
+
+  const clusterErr = validateModel(config.model, allowed);
+  if (clusterErr) problems.push(clusterErr.error);
+
+  const models = config.models;
+  if (models !== undefined && models !== null) {
+    if (typeof models !== "object" || Array.isArray(models)) {
+      // An array can't express "no override for this agent" once null means
+      // "kiro-cli default", so it is rejected rather than coerced.
+      return {
+        error: "models must be an object keyed by agent index (e.g. {\"0\": \"model-id\", \"3\": null}), not an array",
+      };
+    }
+    for (const [key, value] of Object.entries(models)) {
+      if (!/^\d+$/.test(key)) {
+        problems.push(`models key "${key}" must be a non-negative integer agent index`);
+        continue;
+      }
+      const valueErr = validateModel(value, allowed);
+      if (valueErr) problems.push(`models["${key}"]: ${valueErr.error}`);
+    }
+  }
+
+  if (problems.length === 0) return null;
+  const result: { error: string; validModels?: string[] } = { error: problems.join("; ") };
+  if (allowed && allowed.size > 0) result.validModels = [...allowed];
+  return result;
+}
+
+/**
  * Validate cluster config fields. Returns an error string or null if valid.
- * Used by both POST /cluster/start and PUT /cluster/config.
+ * Used by both POST /cluster/start and PUT /cluster/config. Model validation
+ * is handled separately by validateModelSelection() at each call site, since
+ * it needs the (async-loaded) catalog and returns a richer error shape.
  */
 function validateConfig(config: ClusterConfig): string | null {
   if (config.concurrency > CONCURRENCY_CAP) {
     return `concurrency ${config.concurrency} exceeds the configured cap of ${CONCURRENCY_CAP}`;
   }
+  // computeType is optional (older configs) — absent means "ecs".
+  if (config.computeType !== undefined && config.computeType !== "ec2" && config.computeType !== "ecs") {
+    return `computeType must be "ec2" or "ecs"`;
+  }
+  // instanceType is only consumed on EC2, but validate its shape
+  // unconditionally so a garbled config is caught regardless of the
+  // active backend (the field round-trips either way, like swarmK).
   if (!/^(t|c|m|r)\d+g\.(small|medium|large|xlarge)$/.test(config.instanceType)) {
     return `instanceType "${config.instanceType}" is not in the allowed set (Graviton t/c/m/r families, small through xlarge)`;
+  }
+  // taskSize is the ECS mirror of instanceType — optional (absent means
+  // "medium"), validated unconditionally like instanceType.
+  if (
+    config.taskSize !== undefined &&
+    config.taskSize !== "small" && config.taskSize !== "medium" &&
+    config.taskSize !== "large" && config.taskSize !== "xlarge"
+  ) {
+    return `taskSize must be one of "small", "medium", "large", "xlarge"`;
   }
   // Algorithm validation runs early so downstream field checks can branch
   // on the active algorithm (neighbourRadius is only used by amorphous;
   // swarmK only by swarm).
-  if (config.algorithm !== "amorphous" && config.algorithm !== "mesh" && config.algorithm !== "swarm") {
-    return `algorithm must be one of "amorphous", "mesh", "swarm"`;
+  if (
+    config.algorithm !== "amorphous" &&
+    config.algorithm !== "mesh" &&
+    config.algorithm !== "swarm" &&
+    config.algorithm !== "single"
+  ) {
+    return `algorithm must be one of "amorphous", "mesh", "swarm", "single"`;
+  }
+  // single takes any concurrency >= 1. Each agent runs the direction alone
+  // with no peers, so N agents are N independent fire-and-forget runs of
+  // the same direction (a Kiro Factory remote loop uses this for several
+  // lone workers on one card). The old rule pinned it to exactly 1.
+  if (config.algorithm === "single" && (!Number.isInteger(config.concurrency) || config.concurrency < 1)) {
+    return `algorithm "single" requires concurrency >= 1 (got ${config.concurrency})`;
   }
   // neighbourRadius is only used by the amorphous algorithm. mesh and
   // swarm ignore it at runtime, so don't reject a stale value when the
@@ -484,9 +962,9 @@ function validateConfig(config: ClusterConfig): string | null {
   if (!Number.isInteger(config.loopIntervalSeconds) || config.loopIntervalSeconds < 0 || config.loopIntervalSeconds > 3600) {
     return "loopIntervalSeconds must be an integer between 0 and 3600";
   }
-  if (config.model !== null) {
-    return "model must be null (auto); custom model selection is not yet supported";
-  }
+  // model and the per-agent models map are validated separately by
+  // validateModelSelection() at each call site — it needs the async-loaded
+  // catalog and returns the valid set on a bad value.
   // swarmK range is only enforced when algorithm === "swarm" (the field is
   // accepted either way so the UI can populate it ahead of a mode switch).
   if (config.algorithm === "swarm") {
@@ -496,6 +974,25 @@ function validateConfig(config: ClusterConfig): string | null {
   }
   if (typeof config.autopause !== "boolean") {
     return "autopause must be a boolean";
+  }
+  if (typeof config.selfOptimizing !== "boolean") {
+    return "selfOptimizing must be a boolean";
+  }
+  if (typeof config.browserAutomation !== "boolean") {
+    return "browserAutomation must be a boolean";
+  }
+  // trustDeploy is optional — validate only when present
+  if (config.trustDeploy !== undefined && typeof config.trustDeploy !== "boolean") {
+    return "trustDeploy must be a boolean";
+  }
+  // everforgeGroup is optional — validate format when present
+  if (config.everforgeGroup !== undefined && config.everforgeGroup !== null) {
+    if (typeof config.everforgeGroup !== "string") {
+      return "everforgeGroup must be a string or null";
+    }
+    if (!/^[a-z0-9][a-z0-9_-]{0,30}[a-z0-9]$/.test(config.everforgeGroup)) {
+      return "everforgeGroup must match the same format as cluster IDs (lowercase alphanumerics/hyphens, 2-32 chars)";
+    }
   }
   return null;
 }
@@ -526,12 +1023,16 @@ function validateClusterId(id: unknown): string | null {
 const DEFAULT_CLUSTER_CONFIG: ClusterConfig = {
   concurrency: 3,
   neighbourRadius: 1,
+  computeType: "ecs",
   instanceType: "t4g.medium",
+  taskSize: "medium",
   loopIntervalSeconds: 30,
   model: null,
   algorithm: "amorphous",
   swarmK: 4,
   autopause: true,
+  selfOptimizing: false,
+  browserAutomation: false,
 };
 
 /**
@@ -552,7 +1053,7 @@ const DEFAULT_CLUSTER_CONFIG: ClusterConfig = {
  */
 async function ensureRegistered(
   clusterId: string,
-  algorithm: "amorphous" | "mesh" | "swarm" = "amorphous",
+  algorithm: "amorphous" | "mesh" | "swarm" | "single" = "amorphous",
 ): Promise<void> {
   if (validateClusterId(clusterId) !== null) return;
   let onDisk: ClusterRegistry = { clusters: [] };
@@ -614,32 +1115,36 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       if (existing.algorithm === undefined) existing.algorithm = "amorphous";
       if (existing.swarmK === undefined) existing.swarmK = 4;
       if (typeof existing.autopause !== "boolean") existing.autopause = true;
-
+      if (typeof existing.selfOptimizing !== "boolean") existing.selfOptimizing = false;
+      if (typeof existing.browserAutomation !== "boolean") existing.browserAutomation = false;
+      if (existing.trustDeploy === undefined) existing.trustDeploy = false;
+      if (existing.computeType !== "ec2" && existing.computeType !== "ecs") existing.computeType = "ecs";
+      if (existing.taskSize === undefined) existing.taskSize = "medium";
       const config = { ...existing, ...overrides } as ClusterConfig;
 
       const err = validateConfig(config);
       if (err) return json(400, { error: err });
+      const modelErr = validateModelSelection(config, catalogModelIds(await loadModelCatalog()));
+      if (modelErr) return json(400, modelErr);
 
       // Register the cluster on first Start so WeltenBuilder's list view
       // picks it up. Safe no-op if it's already registered.
       await ensureRegistered(clusterId, config.algorithm);
 
+      // Compute backend for this start. Restart-required field, so the
+      // value merged above is authoritative for the whole launch.
+      const compute = getComputeManager(computeTypeOf(config), BUCKET);
+
       // If this is the async background invocation, do the actual work.
       if (event.headers?.["x-aga-async"] === "true") {
-        try {
-        // Guard against double-start. Filter by tag:ClusterId so one
-        // cluster's start never sees another cluster's instances as
-        // "already running". Belt-and-braces with the state.json check
-        // the sync path already did; covers the unlikely case where two
-        // operators clicked Start simultaneously and both passed the
-        // sync-path guard before either reached the async invoke.
-        const startFilters: Array<{ Name: string; Values: string[] }> = [
-          { Name: "tag:Project", Values: ["kiro-flock"] },
-          { Name: "tag:ClusterId", Values: [clusterId] },
-          { Name: "instance-state-name", Values: ["pending", "running"] },
-        ];
-        const existingInstances = await ec2.send(new DescribeInstancesCommand({ Filters: startFilters }));
-        const existingCount = (existingInstances.Reservations ?? []).flatMap(r => r.Instances ?? []).length;
+        // Guard against double-start. Scoped to this cluster (ClusterId
+        // tag on EC2, startedBy on ECS) so one cluster's start never sees
+        // another cluster's runtimes as "already running". Belt-and-braces
+        // with the state.json check the sync path already did; covers the
+        // unlikely case where two operators clicked Start simultaneously
+        // and both passed the sync-path guard before either reached the
+        // async invoke.
+        const existingCount = await compute.liveCount(clusterId);
         if (existingCount > 0) {
           console.log(`start[${clusterId}]: rejected, ${existingCount} agents already running`);
           // Roll the state back so the operator can retry once the
@@ -654,28 +1159,92 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // state.json and cluster-snapshot.json are excluded from the sweep.
         await archiveStoreToHistory(clusterId, `start[${clusterId}]`);
 
-        console.log(`start[${clusterId}]: launching`, config.concurrency, "instances, type:", config.instanceType);
+        // Re-seed the transitions log for the new run. The sync path's
+        // "starting" transition was appended before the archive sweep, so
+        // it just left with the previous run's store/. Without this the
+        // new run's dashboard timeline band has no start marker.
+        await appendTransition(BUCKET, clusterId, {
+          ts: new Date().toISOString(),
+          state: "starting",
+          by: "operator",
+          reason: "manual",
+        });
+
+        // Pre-trust: if trustDeploy is enabled, write a trusted approval
+        // file for every agent so deploy_request fires immediately without
+        // waiting for an operator click. Written before instances launch so
+        // the file is in place when the first agent iteration runs.
+        if (config.trustDeploy) {
+          const preTrustPromises: Promise<void>[] = [];
+          for (let i = 0; i < config.concurrency; i++) {
+            const approvalKey = `store/approvals/${clusterId}/agent-${i}.json`;
+            const approvalFile = {
+              status: "trusted",
+              mode: "remote",
+              summary: "pre-trusted on cluster start",
+              systemname: clusterId,
+              cwd: "",
+              stackName: "",
+              createdAt: new Date().toISOString(),
+              decidedBy: "operator (trustDeploy)",
+              decidedAt: new Date().toISOString(),
+            };
+            preTrustPromises.push(
+              s3.send(new PutObjectCommand({
+                Bucket: BUCKET,
+                Key: approvalKey,
+                Body: JSON.stringify(approvalFile, null, 2),
+                ContentType: "application/json",
+              })).then(() => undefined),
+            );
+          }
+          await Promise.all(preTrustPromises);
+          console.log(`start[${clusterId}]: pre-trusted ${config.concurrency} agents (trustDeploy=true)`);
+        }
+
+        console.log(`start[${clusterId}]: launching`, config.concurrency, "agents on", compute.computeType, compute.computeType === "ec2" ? `(type ${config.instanceType})` : "(fargate)");
         await writeClusterConfig(BUCKET, config, clusterId);
         // Thread clusterId through so launched instances get a ClusterId
         // tag and the agent user-data sets AGA_CLUSTER_PREFIX correctly.
-        const ids = await startCluster(
-          { bucket: BUCKET, amiId: AMI_ID, securityGroupId: SG_ID, instanceProfileArn: INSTANCE_PROFILE, subnetId: SUBNET_ID },
-          config,
-          clusterId,
-        );
-        return json(200, { instanceIds: ids });
-        } catch (err) {
-          // If the async path fails (e.g. RunInstances throws after partial
-          // launch), terminate any instances that did start and roll state
-          // back to stopped so the operator can retry cleanly.
-          console.error(`start[${clusterId}]: async path failed, rolling back`, err);
+        //
+        // A launch can fail mid-loop — most notably InsufficientInstanceCapacity
+        // when the chosen instance type has no capacity in any of the cluster's
+        // AZs. startCluster rethrows any non-throttle, non-capacity-fallback
+        // error. Without this catch the throw unwinds to the outer handler,
+        // returns a 500 that nobody reads (this is an async Event invocation),
+        // and leaves state.json wedged in "starting" forever. Instead we:
+        //   1. terminate any instances that DID launch before the throw, so a
+        //      retry starts clean (stopCluster filters by the ClusterId tag,
+        //      which every launched instance already carries),
+        //   2. write a terminal, retryable state ("stopped") with the error
+        //      attached so the dashboard, /cluster/list, and the MCP can show
+        //      the operator exactly what went wrong.
+        try {
+          const ids = await compute.start(config, clusterId);
+          return json(200, { instanceIds: ids });
+        } catch (launchErr: unknown) {
+          const code = (launchErr as { name?: string; Code?: string }).name
+            ?? (launchErr as { Code?: string }).Code ?? "LaunchFailed";
+          const message = launchErr instanceof Error ? launchErr.message : String(launchErr);
+          console.error(`start[${clusterId}]: launch failed (${code}): ${message}`);
+          // Partial-launch cleanup: terminate anything that came up before the
+          // throw so the operator's retry isn't blocked by the double-start guard.
           try {
-            await stopCluster(BUCKET, clusterId);
-          } catch (cleanupErr) {
-            console.error(`start[${clusterId}]: cleanup termination also failed`, cleanupErr);
+            await compute.stop(clusterId);
+          } catch (cleanupErr: unknown) {
+            const cleanupMsg = cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr);
+            console.error(`start[${clusterId}]: partial-launch cleanup failed: ${cleanupMsg}`);
           }
-          await setOperatorState(clusterId, "stopped", `start-failed: ${err instanceof Error ? err.message : String(err)}`);
-          return json(500, { error: `cluster start failed: ${err instanceof Error ? err.message : String(err)}` });
+          // Roll state back to a terminal, retryable state with the cause
+          // captured. Reusing "stopped" (rather than a new "failed" value)
+          // keeps every exhaustive ClusterStateValue consumer correct; the
+          // error rides as data on the state doc.
+          await setOperatorState(clusterId, "stopped", "launch-failed", {
+            code,
+            message,
+            at: new Date().toISOString(),
+          });
+          return json(500, { error: `launch failed: ${message}`, code });
         }
       }
 
@@ -716,25 +1285,27 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     if (method === "POST" && action === "stop") {
       console.log(`stop[${clusterId}]: terminating cluster`);
       await setOperatorState(clusterId, "stopping", "manual");
-      // Scope termination to this cluster's instances via the ClusterId
-      // tag so one cluster's stop doesn't take down another.
-      await stopCluster(BUCKET, clusterId);
+      // The stored config tells us which compute backend the cluster was
+      // started on. Missing config (never started / already cleaned) means
+      // there is nothing to terminate on the non-default backend — fall
+      // back to EC2, whose tag-scoped stop is a safe no-op.
+      let stopCompute: ComputeType = "ec2";
+      try {
+        stopCompute = computeTypeOf(await readClusterConfig(BUCKET, clusterId));
+      } catch { /* no config — default ec2 */ }
+      const compute = getComputeManager(stopCompute, BUCKET);
+      // Scope termination to this cluster's runtimes (ClusterId tag on
+      // EC2, startedBy on ECS) so one cluster's stop doesn't take down
+      // another.
+      await compute.stop(clusterId);
 
-      // If no instances remain (already terminated or never existed),
+      // If no runtimes remain (already terminated or never existed),
       // transition directly to "stopped" so the cluster doesn't get
       // stuck in "stopping" waiting for a reconciliation pass.
-      const remaining = await ec2.send(new DescribeInstancesCommand({
-        Filters: [
-          { Name: "tag:Project", Values: ["kiro-flock"] },
-          { Name: "tag:ClusterId", Values: [clusterId] },
-          { Name: "instance-state-name", Values: ["pending", "running", "stopping", "shutting-down"] },
-        ],
-      }));
-      const liveCount = (remaining.Reservations ?? []).reduce(
-        (n, r) => n + (r.Instances?.length ?? 0), 0);
+      const liveCount = await compute.liveCount(clusterId);
       if (liveCount === 0) {
         await setOperatorState(clusterId, "stopped", "immediate");
-        console.log(`stop[${clusterId}]: no instances remain, state -> stopped`);
+        console.log(`stop[${clusterId}]: no agent runtimes remain, state -> stopped`);
       }
 
       // Archive the store to history/ so the next start gets a clean slate.
@@ -792,13 +1363,23 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     // Starting → Running, so the dashboard sees the click effect on the
     // very next poll regardless of when the snapshot last rebuilt.
     if (method === "GET" && action === "status") {
-      const liveState = await readClusterState(clusterId);
+      // Read the full state doc (not just .state) so we can surface the
+      // authoritative lastError and reason. state.json is the single source
+      // of truth — updated synchronously on every operator transition and by
+      // agents on Starting → Running — so the dashboard sees the click effect
+      // and any launch failure on the very next poll.
+      const { doc: stateDoc } = await readState(BUCKET, clusterId);
+      const liveState = stateDoc.state;
+      const lastError = stateDoc.lastError ?? null;
+      const stateReason = stateDoc.reason ?? null;
       try {
         const resp = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: snapshotKey(clusterId) }));
         const text = (await resp.Body?.transformToString()) ?? "";
         const snapshot = JSON.parse(text);
         snapshot.clusterState = liveState;
         snapshot.paused = liveState === "paused";
+        snapshot.lastError = lastError;
+        snapshot.stateReason = stateReason;
 
         const lastBuiltMs = snapshot.lastBuilt ? new Date(snapshot.lastBuilt).getTime() : 0;
         const age = Date.now() - lastBuiltMs;
@@ -818,7 +1399,136 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
             clusterState: liveState,
             clusterStartTime: null,
             paused: liveState === "paused",
+            lastError,
+            stateReason,
           });
+        }
+        throw err;
+      }
+    }
+
+    // ---- Dashboard: fleet overview -------------------------------------------
+    // Serves the builder-produced dashboard/overview.json verbatim.
+    // Stale-while-revalidate: a doc older than DASHBOARD_STALE_MS is
+    // returned as-is with an async rebuild fired behind it. Before the
+    // first build exists the route answers 202 {status:"building"} and
+    // the frontend polls every 2 s until 200.
+    if (method === "GET" && action === "dashboard/overview") {
+      try {
+        const resp = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: "dashboard/overview.json" }));
+        const text = (await resp.Body?.transformToString()) ?? "";
+        const doc = JSON.parse(text) as { lastBuilt?: unknown };
+        const builtMs = typeof doc.lastBuilt === "string" ? new Date(doc.lastBuilt).getTime() : 0;
+        if (!Number.isFinite(builtMs) || Date.now() - builtMs > DASHBOARD_STALE_MS) {
+          void triggerDashboardBuild({ target: "overview" });
+        }
+        return json(200, doc);
+      } catch (err: unknown) {
+        if ((err as { name?: string }).name === "NoSuchKey") {
+          void triggerDashboardBuild({ target: "overview" });
+          return json(202, { status: "building" });
+        }
+        throw err;
+      }
+    }
+
+    // ---- Dashboard: run selector list ----------------------------------------
+    // Lists selectable runs for one cluster: the live "current" run first
+    // (when the cluster has agent logs or a non-stopped state), then
+    // archived runs newest-first. Archived entries use history/<ts>/run.json
+    // when present; legacy archives without a manifest fall back to the
+    // folder timestamp for endedAt (the builder self-heals them lazily).
+    if (method === "GET" && action === "dashboard/runs") {
+      // Enumerate history/<ts>/ prefixes.
+      const runIds: string[] = [];
+      let token: string | undefined;
+      do {
+        const res = await s3.send(new ListObjectsV2Command({
+          Bucket: BUCKET, Prefix: "history/", Delimiter: "/", ContinuationToken: token,
+        }));
+        for (const p of res.CommonPrefixes ?? []) {
+          if (!p.Prefix) continue;
+          const id = p.Prefix.slice("history/".length).replace(/\/$/, "");
+          if (id) runIds.push(id);
+        }
+        token = res.IsTruncated ? res.NextContinuationToken : undefined;
+      } while (token);
+
+      const archived = (await Promise.all(runIds.map(async (runId) => {
+        // run.json first: authoritative clusterId + timestamps.
+        const manifestText = await getTextOrEmpty(`history/${runId}/run.json`);
+        if (manifestText) {
+          try {
+            const m = JSON.parse(manifestText) as { clusterId?: unknown; startedAt?: unknown; endedAt?: unknown };
+            if (m.clusterId !== clusterId) return null;
+            return {
+              runId,
+              clusterId,
+              startedAt: typeof m.startedAt === "string" ? m.startedAt : null,
+              endedAt: typeof m.endedAt === "string" ? m.endedAt : parseRunIdTimestamp(runId),
+              live: false,
+            };
+          } catch { /* malformed manifest — fall through to prefix probe */ }
+        }
+        // No manifest: probe whether this archive contains the cluster.
+        const probe = await s3.send(new ListObjectsV2Command({
+          Bucket: BUCKET, Prefix: `history/${runId}/${clusterPrefix(clusterId)}store/`, MaxKeys: 1,
+        }));
+        if ((probe.KeyCount ?? 0) === 0) return null;
+        return { runId, clusterId, startedAt: null, endedAt: parseRunIdTimestamp(runId), live: false };
+      }))).filter((r): r is NonNullable<typeof r> => r !== null)
+        // Newest-first: the runId format sorts lexicographically by time.
+        .sort((a, b) => b.runId.localeCompare(a.runId));
+
+      // "current" appears when the cluster has a non-archived store/
+      // (any agent logs or a non-stopped state).
+      const [logProbe, stateRead, transitionsText] = await Promise.all([
+        s3.send(new ListObjectsV2Command({
+          Bucket: BUCKET, Prefix: `${clusterPrefix(clusterId)}store/agent-`, MaxKeys: 1,
+        })),
+        readState(BUCKET, clusterId),
+        getTextOrEmpty(`${clusterPrefix(clusterId)}store/transitions.ndjson`),
+      ]);
+      const runs: Array<{ runId: string; clusterId: string; startedAt: string | null; endedAt: string | null; live: boolean }> = [];
+      if ((logProbe.KeyCount ?? 0) > 0 || stateRead.doc.state !== "stopped") {
+        // startedAt from the earliest transitions entry — the log is
+        // append-only, re-seeded on every start, so its head marks the
+        // current run's beginning. Null for runs predating the log.
+        const startedAt = transitionsText ? earliestTs(parseTransitions(transitionsText)) : null;
+        runs.push({ runId: "current", clusterId, startedAt, endedAt: null, live: true });
+      }
+      runs.push(...archived);
+      return json(200, { runs });
+    }
+
+    // ---- Dashboard: per-run drill-down ----------------------------------------
+    // Serves dashboard/{clusterId}/{runId}.json. `run` defaults to
+    // "current". Archived runs are immutable — cached forever, never
+    // rebuilt once present. The current run gets the same 202-while-
+    // building and stale-while-revalidate treatment as the overview.
+    if (method === "GET" && action === "dashboard") {
+      const runId = event.queryStringParameters?.run || "current";
+      // The runId is either "current" or a history/ folder timestamp;
+      // reject anything that could traverse into another key space.
+      if (!/^[A-Za-z0-9_.-]+$/.test(runId)) {
+        return json(400, { error: "invalid run id" });
+      }
+      const cacheKey = `dashboard/${clusterId}/${runId}.json`;
+      try {
+        const resp = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: cacheKey }));
+        const text = (await resp.Body?.transformToString()) ?? "";
+        const doc = JSON.parse(text) as { lastBuilt?: unknown };
+        if (runId === "current") {
+          const builtMs = typeof doc.lastBuilt === "string" ? new Date(doc.lastBuilt).getTime() : 0;
+          if (!Number.isFinite(builtMs) || Date.now() - builtMs > DASHBOARD_STALE_MS) {
+            void triggerDashboardBuild({ target: "cluster", clusterId, runId });
+          }
+        }
+        return json(200, doc);
+      } catch (err: unknown) {
+        if ((err as { name?: string }).name === "NoSuchKey") {
+          void triggerDashboardBuild({ target: "cluster", clusterId, runId });
+          return json(202, { status: "building" });
         }
         throw err;
       }
@@ -871,6 +1581,150 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return json(202, { status: "pending", retryAfter: ANALYSIS_RETRY_AFTER_S });
     }
 
+    // ---- Read per-agent directive ------------------------------------------
+    // GET /cluster/agent-directive/{clusterId}?agentIndex=N
+    //
+    // Returns the markdown body of {clusterId}/store/agent-N.directive.md,
+    // or { directive: null } when no directive has been issued. Cheap
+    // single GetObject on operator click; the dashboard already knows
+    // hasDirective from the snapshot poll, so this only fires when the
+    // operator wants to read content.
+    if (method === "GET" && action === "agent-directive") {
+      const qs = event.queryStringParameters ?? {};
+      const rawIdx = qs.agentIndex;
+      if (typeof rawIdx !== "string" || !/^\d+$/.test(rawIdx)) {
+        return json(400, { error: "agentIndex query parameter is required and must be a non-negative integer" });
+      }
+      const agentIndex = Number(rawIdx);
+      const key = `${clusterPrefix(clusterId)}store/agent-${agentIndex}.directive.md`;
+      try {
+        const resp = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: key }));
+        const directive = (await resp.Body?.transformToString()) ?? "";
+        return json(200, { agentIndex, directive });
+      } catch (err: unknown) {
+        if ((err as { name?: string }).name === "NoSuchKey") {
+          return json(200, { agentIndex, directive: null });
+        }
+        throw err;
+      }
+    }
+
+    // ---- Per-agent iteration costs -------------------------------------------
+    // GET /cluster/agent-costs/{clusterId}?agentIndex=N
+    //
+    // Returns the parsed contents of {clusterId}/store/agent-N.costs.ndjson:
+    // one entry per completed iteration with its credit spend, plus the
+    // agent's running lifetime total. Single GetObject, fetched lazily by
+    // the Kiro Node view when the operator opens an agent — never on the
+    // snapshot poll, so it adds nothing to the steady-state request load.
+    // The file grows ~120 bytes per iteration, so even a 10k-iteration run
+    // is ~1.2 MB — fine for an on-demand read.
+    if (method === "GET" && action === "agent-costs") {
+      const idError = validateClusterId(clusterId);
+      if (idError) return json(400, { error: idError });
+      const qs = event.queryStringParameters ?? {};
+      const rawIdx = qs.agentIndex;
+      if (typeof rawIdx !== "string" || !/^\d+$/.test(rawIdx)) {
+        return json(400, { error: "agentIndex query parameter is required and must be a non-negative integer" });
+      }
+      const agentIndex = Number(rawIdx);
+      const key = `${clusterPrefix(clusterId)}store/agent-${agentIndex}.costs.ndjson`;
+      try {
+        const resp = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: key }));
+        const text = (await resp.Body?.transformToString()) ?? "";
+        // Two line shapes. A measured iteration carries `credits`; an
+        // interrupted one carries `unmetered: true` and NO credits, because
+        // kiro-cli only records metering for turns that complete, so the value
+        // is genuinely unknown rather than late. Unmetered lines used to be
+        // dropped by a `typeof credits === "number"` guard, which made every
+        // total read as complete when it was only a floor.
+        const entries: Array<{ ts: string; iteration: number; sessionId: string; credits: number | null; unmetered: boolean; totalCredits: number }> = [];
+        for (const raw of text.split("\n")) {
+          const line = raw.trim();
+          if (!line) continue;
+          try {
+            const e = JSON.parse(line) as { ts?: unknown; iteration?: unknown; sessionId?: unknown; credits?: unknown; unmetered?: unknown; totalCredits?: unknown };
+            if (typeof e.iteration !== "number" || !Number.isFinite(e.iteration)) continue;
+            const hasCredits = typeof e.credits === "number" && Number.isFinite(e.credits);
+            const unmetered = e.unmetered === true || !hasCredits;
+            entries.push({
+              ts: typeof e.ts === "string" ? e.ts : "",
+              iteration: e.iteration,
+              sessionId: typeof e.sessionId === "string" ? e.sessionId : "",
+              credits: hasCredits ? (e.credits as number) : null,
+              unmetered,
+              totalCredits: typeof e.totalCredits === "number" && Number.isFinite(e.totalCredits) ? e.totalCredits : 0,
+            });
+          } catch { /* skip malformed line */ }
+        }
+        // The running total is a sum of readings only, so take it from the last
+        // line that actually carried one — an unmetered line carries the total
+        // forward unchanged, but a trailing malformed line should not zero it.
+        let totalCredits: number | null = null;
+        for (let i = entries.length - 1; i >= 0; i--) {
+          if (entries[i].totalCredits > 0 || entries[i].credits !== null) {
+            totalCredits = entries[i].totalCredits;
+            break;
+          }
+        }
+        const unmeteredCount = entries.filter((e) => e.unmetered).length;
+        return json(200, { agentIndex, entries, totalCredits, unmeteredCount });
+      } catch (err: unknown) {
+        if ((err as { name?: string }).name === "NoSuchKey") {
+          return json(200, { agentIndex, entries: [], totalCredits: null });
+        }
+        throw err;
+      }
+    }
+
+    // ---- Per-agent live stream tail (Kiro Node view) -------------------------
+    // GET /cluster/agent-stream/{clusterId}?agentIndex=N&kind=console|acp
+    //
+    // One SSM RunCommand per fetch (a TAIL, never a full-session read —
+    // see stream-console-plan.md). kind=console tails the aga-agent
+    // journald unit; kind=acp tails the active ACP session .jsonl and
+    // formats it to markdown. Lazy: only fires while an operator has the
+    // Kiro Node section open on this agent, so SSM fan-out is bounded by
+    // human behaviour. "Cluster not running" style situations answer 200
+    // with { content: null, unavailable } so the UI shows a quiet empty
+    // state instead of an error toast.
+    if (method === "GET" && action === "agent-stream") {
+      const idError = validateClusterId(clusterId);
+      if (idError) return json(400, { error: idError });
+      const qs = event.queryStringParameters ?? {};
+      const rawIdx = qs.agentIndex;
+      if (typeof rawIdx !== "string" || !/^\d+$/.test(rawIdx)) {
+        return json(400, { error: "agentIndex query parameter is required and must be a non-negative integer" });
+      }
+      const kind = qs.kind;
+      if (kind !== "console" && kind !== "acp" && kind !== "acp-list") {
+        return json(400, { error: 'kind query parameter is required and must be "console", "acp", or "acp-list"' });
+      }
+      // Optional past-iteration selector (acp only). Allowlist-validated
+      // here AND in agentStream.ts before it reaches the shell template.
+      const sessionId = qs.sessionId;
+      if (sessionId !== undefined && !SESSION_ID_RE.test(sessionId)) {
+        return json(400, { error: "sessionId must match ^[A-Za-z0-9_-]{1,128}$" });
+      }
+      if (sessionId !== undefined && kind !== "acp") {
+        return json(400, { error: 'sessionId is only valid with kind "acp"' });
+      }
+      // Works on both compute backends: agentStream routes on the shape of
+      // the snapshot's per-agent runtime id — SSM RunCommand + journald on
+      // EC2, ECS Exec + CloudWatch Logs on Fargate.
+      try {
+        if (kind === "acp-list") {
+          const result = await listAgentSessions(s3, BUCKET, clusterId, Number(rawIdx));
+          return json(200, result);
+        }
+        const result = await fetchAgentStream(s3, BUCKET, clusterId, Number(rawIdx), kind, sessionId);
+        return json(200, result);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return json(502, { error: `stream fetch failed: ${msg}` });
+      }
+    }
+
     // ---- Read config --------------------------------------------------------
     if (method === "GET" && action === "config") {
       // A cluster the operator just landed on from the WeltenBuilder "+"
@@ -889,7 +1743,28 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       if (cfg.algorithm === undefined) cfg.algorithm = "amorphous";
       if (cfg.swarmK === undefined) cfg.swarmK = 4;
       if (typeof cfg.autopause !== "boolean") cfg.autopause = true;
+      // Pass 8 backfill — off by default to preserve existing behaviour.
+      if (typeof cfg.selfOptimizing !== "boolean") cfg.selfOptimizing = false;
+      if (typeof cfg.browserAutomation !== "boolean") cfg.browserAutomation = false;
+      if (cfg.trustDeploy === undefined) cfg.trustDeploy = false;
+      if (cfg.computeType !== "ec2" && cfg.computeType !== "ecs") cfg.computeType = "ecs";
+      if (cfg.taskSize === undefined) cfg.taskSize = "medium";
+      // model: older configs predate the selectable-model feature. null means
+      // "use kiro-cli's own default" — the same effective behaviour they had.
+      if (cfg.model === undefined) cfg.model = null;
+      // everforgeGroup: no backfill needed — undefined/null both mean "not grouped"
       return json(200, cfg);
+    }
+
+    // ---- Model catalog (global, not per-cluster) ----------------------------
+    // Returns the models baked into config/models.json by install.sh
+    // (`kiro-cli --list-models`). The dashboard reads this to populate its
+    // model picker. When the catalog hasn't been baked yet (old deployment)
+    // the models array is empty — the picker then offers only the "default"
+    // option and the backend validates any chosen model permissively.
+    if (method === "GET" && action === "models") {
+      const catalog = await loadModelCatalog();
+      return json(200, catalog ?? { models: [], default_model: null });
     }
 
     // ---- Update config (partial merge) --------------------------------------
@@ -908,11 +1783,19 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       if (existing.algorithm === undefined) existing.algorithm = "amorphous";
       if (existing.swarmK === undefined) existing.swarmK = 4;
       if (typeof existing.autopause !== "boolean") existing.autopause = true;
+      // Pass 8 backfill.
+      if (typeof existing.selfOptimizing !== "boolean") existing.selfOptimizing = false;
+      if (typeof existing.browserAutomation !== "boolean") existing.browserAutomation = false;
+      if (existing.trustDeploy === undefined) existing.trustDeploy = false;
+      if (existing.computeType !== "ec2" && existing.computeType !== "ecs") existing.computeType = "ecs";
+      if (existing.taskSize === undefined) existing.taskSize = "medium";
       const partial = JSON.parse(body ?? "{}");
       const merged: ClusterConfig = { ...existing, ...partial };
 
       const err = validateConfig(merged);
       if (err) return json(400, { error: err });
+      const modelErr = validateModelSelection(merged, catalogModelIds(await loadModelCatalog()));
+      if (modelErr) return json(400, modelErr);
 
       console.log(`config[${clusterId}] update:`, JSON.stringify(merged));
       await writeClusterConfig(BUCKET, merged, clusterId);
@@ -1034,6 +1917,128 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if ((err as { name?: string }).name === "NoSuchKey") return json(404, { error: "not found" });
         throw err;
       }
+    }
+
+    // ---- Scoped environment queue routes ------------------------------------
+    // Three routes that let an external operator (Kiro Factory) move queue
+    // items in and out of ONE cluster's environment/<id>/ prefix over REST.
+    // Unlike habitat/, these are strictly scoped: every key is built
+    // server-side as environment/<clusterId>/<rel> and <rel> is validated
+    // by scopedKey (no "..", no leading "/", no control chars). Writes and
+    // deletes are further confined to <rel> starting with "queue/". The
+    // Lambda role is bucket-wide, so this validation IS the access control.
+    //
+    // Unknown cluster ids return 404 so a caller cannot probe or populate
+    // prefixes for clusters that were never registered.
+    // The cluster's deployment group decides where its folder is
+    // (environment/<group>/<id>/ when set). Read once per request so every
+    // scoped key below lands in the folder the agents actually use.
+    let envGroup: string | null = null;
+    if (action === "env-list" || action === "env-put" || action === "env-delete") {
+      if (validateClusterId(clusterId) !== null) return json(404, { error: "cluster not found" });
+      const registry = await readRegistry(BUCKET);
+      if (!registry.clusters.some((c) => c.id === clusterId)) return json(404, { error: "cluster not found" });
+      try {
+        envGroup = (await readClusterConfig(BUCKET, clusterId))?.everforgeGroup ?? null;
+      } catch {
+        envGroup = null; // no config yet: ungrouped, same as the agents assume
+      }
+    }
+
+    if (method === "GET" && action === "env-list") {
+      const q = event.queryStringParameters ?? {};
+      const scoped = scopedKey(clusterId, q.prefix ?? "", { allowEmpty: true, group: envGroup });
+      if (!scoped.ok) return json(403, { error: scoped.error });
+      const limit = clampLimit(q.limit);
+      const inline = parseInline(q.inline);
+      let startAfter: string | undefined;
+      if (q.after) {
+        const afterScoped = scopedKey(clusterId, q.after, { group: envGroup });
+        if (!afterScoped.ok) return json(403, { error: afterScoped.error });
+        startAfter = afterScoped.key;
+      }
+
+      const resp = await s3.send(new ListObjectsV2Command({
+        Bucket: BUCKET,
+        Prefix: scoped.key,
+        MaxKeys: limit,
+        StartAfter: startAfter,
+      }));
+
+      const files: { key: string; size: number; lastModified: string; content?: string }[] = [];
+      let inlineBudget = INLINE_TOTAL_BYTES;
+      for (const obj of resp.Contents ?? []) {
+        if (!obj.Key) continue;
+        const rel = relativeKey(clusterId, obj.Key, envGroup);
+        if (!rel) continue;
+        const size = obj.Size ?? 0;
+        const entry: { key: string; size: number; lastModified: string; content?: string } = {
+          key: rel,
+          size,
+          lastModified: obj.LastModified?.toISOString() ?? "",
+        };
+        if (inline && size <= INLINE_MAX_BYTES && size <= inlineBudget) {
+          try {
+            const got = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: obj.Key }));
+            entry.content = (await got.Body?.transformToString()) ?? "";
+            inlineBudget -= size;
+          } catch (err: unknown) {
+            // Object vanished between list and get (another node moved it).
+            // Leave content absent; the client fetches or skips.
+            if ((err as { name?: string }).name !== "NoSuchKey") throw err;
+          }
+        }
+        files.push(entry);
+      }
+      const next = resp.IsTruncated && files.length > 0 ? files[files.length - 1].key : null;
+      return json(200, { files, next });
+    }
+
+    if (method === "PUT" && action === "env-put") {
+      const parsed = parsePutBody(body);
+      if (!parsed.ok) return json(parsed.status, { error: parsed.error });
+      const scoped = scopedKey(clusterId, parsed.rel, { requireQueuePrefix: true, group: envGroup });
+      if (!scoped.ok) return json(403, { error: scoped.error });
+      try {
+        const put = await s3.send(new PutObjectCommand({
+          Bucket: BUCKET,
+          Key: scoped.key,
+          Body: parsed.content,
+          ContentType: contentTypeFor(parsed.rel),
+          ...(parsed.ifNoneMatch ? { IfNoneMatch: "*" } : {}),
+        }));
+        return json(200, { key: parsed.rel, etag: put.ETag ?? null });
+      } catch (err: unknown) {
+        const name = (err as { name?: string }).name;
+        const status = (err as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode;
+        if (name === "PreconditionFailed" || status === 412) return json(412, { error: "exists" });
+        throw err;
+      }
+    }
+
+    if (method === "POST" && action === "env-delete") {
+      const parsed = parseDeleteBody(body);
+      if (!parsed.ok) return json(parsed.status, { error: parsed.error });
+      const absolute: string[] = [];
+      for (const rel of parsed.rels) {
+        const scoped = scopedKey(clusterId, rel, { requireQueuePrefix: true, group: envGroup });
+        // One bad key rejects the whole call and nothing is deleted.
+        if (!scoped.ok) return json(403, { error: `${rel}: ${scoped.error}` });
+        absolute.push(scoped.key);
+      }
+      const resp = await s3.send(new DeleteObjectsCommand({
+        Bucket: BUCKET,
+        Delete: { Objects: absolute.map((k) => ({ Key: k })), Quiet: false },
+      }));
+      const deleted = (resp.Deleted ?? [])
+        .map((d) => d.Key && relativeKey(clusterId, d.Key, envGroup))
+        .filter((k): k is string => !!k);
+      const errors = (resp.Errors ?? []).map((e) => ({
+        key: (e.Key && relativeKey(clusterId, e.Key, envGroup)) ?? e.Key ?? "",
+        code: e.Code ?? "",
+        message: e.Message ?? "",
+      }));
+      return json(200, { deleted, errors });
     }
 
     // ---- Read direction (operator goal) -------------------------------------
@@ -1177,30 +2182,47 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
             state: stateRead.doc.state,
             _stoppedAt: stateRead.doc.transitionedAt,
             lastUpdate: snapshotRead.lastUpdate,
+            hasAnyDirective: snapshotRead.hasAnyDirective,
+            // Number of agents pinned to a model other than the cluster
+            // baseline. Drives the "mixed models" pill on the stack card so a
+            // heterogeneous cluster is visible without drilling in.
+            modelOverrideCount: snapshotRead.modelOverrideCount,
+            // Lifetime credit spend of this cluster (sum of agent totals),
+            // sourced from the snapshot so /list stays zero-extra-I/O.
+            totalCredits: snapshotRead.totalCredits,
+            // Estimated infra cost (EC2/Fargate) in USD for the current run.
+            infraCostUsd: snapshotRead.infraCostUsd,
+            // Surface a launch failure on the WeltenBuilder card. Null for a
+            // healthy cluster; populated when the last start threw (e.g.
+            // InsufficientInstanceCapacity) and rolled state back to stopped.
+            lastError: stateRead.doc.lastError ?? null,
           };
         }),
       );
 
-      // Reconcile any cluster stuck on "stopping": if EC2 reports zero
-      // live instances for it, flip state.json to "stopped". Single
-      // DescribeInstances filtered by tag, only fires if at least one
-      // cluster is mid-stop.
+      // Reconcile any cluster stuck on "stopping": if its compute backend
+      // reports zero live runtimes, flip state.json to "stopped". Only
+      // fires if at least one cluster is mid-stop (rare) — the common
+      // case pays zero compute-API cost. Stopping clusters are grouped by
+      // their configured computeType so an EC2 cluster is checked against
+      // DescribeInstances and an ECS one against ListTasks.
       const stoppingIds = enriched.filter(c => c.state === "stopping").map(c => c.id);
       if (stoppingIds.length > 0) {
-        const liveResp = await ec2.send(new DescribeInstancesCommand({
-          Filters: [
-            { Name: "tag:Project", Values: ["kiro-flock"] },
-            { Name: "tag:ClusterId", Values: stoppingIds },
-            { Name: "instance-state-name", Values: ["pending", "running", "stopping", "shutting-down"] },
-          ],
+        const byCompute = new Map<ComputeType, string[]>();
+        await Promise.all(stoppingIds.map(async (id) => {
+          let ct: ComputeType = "ec2";
+          try {
+            ct = computeTypeOf(await readClusterConfig(BUCKET, id));
+          } catch { /* no config — default ec2 */ }
+          const group = byCompute.get(ct) ?? [];
+          group.push(id);
+          byCompute.set(ct, group);
         }));
         const stillLive = new Set<string>();
-        for (const r of liveResp.Reservations ?? []) {
-          for (const inst of r.Instances ?? []) {
-            const tag = inst.Tags?.find(t => t.Key === "ClusterId");
-            if (tag?.Value) stillLive.add(tag.Value);
-          }
-        }
+        await Promise.all([...byCompute.entries()].map(async ([ct, ids]) => {
+          const live = await getComputeManager(ct, BUCKET).liveClusterIds(ids);
+          for (const id of live) stillLive.add(id);
+        }));
         await Promise.all(stoppingIds
           .filter(id => !stillLive.has(id))
           .map(async (id) => {
@@ -1262,7 +2284,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return json(200, { clusters: enriched });
     }
 
-
     // ---- Delete a cluster ---------------------------------------------------
     // Removes the cluster from the registry. S3 data under `{id}/` and
     // `environment/{id}/` is intentionally preserved so history/logs stay
@@ -1305,13 +2326,17 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
       const results = await Promise.all(targets.map(async ({ id }) => {
         try {
-          // Per-cluster stop: stopCluster filters by ClusterId tag so each
-          // call only touches the target cluster's instances. Flip state
-          // before terminate so the dashboard reflects the click on the
-          // next poll; /cluster/list reconciles to "stopped" once EC2
-          // shows zero live instances for the cluster.
+          // Per-cluster stop, scoped to each cluster's runtimes (ClusterId
+          // tag on EC2, startedBy on ECS) via its configured compute
+          // backend. Flip state before terminate so the dashboard reflects
+          // the click on the next poll; /cluster/list reconciles to
+          // "stopped" once the backend shows zero live runtimes.
+          let ct: ComputeType = "ec2";
+          try {
+            ct = computeTypeOf(await readClusterConfig(BUCKET, id));
+          } catch { /* no config — default ec2 */ }
           await setOperatorState(id, "stopping", "stop-all");
-          await stopCluster(BUCKET, id);
+          await getComputeManager(ct, BUCKET).stop(id);
           await archiveStoreToHistory(id, `stop-all[${id}]`);
           void triggerAnalysisBuild(id);
           return { id, ok: true as const };
@@ -1351,6 +2376,36 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return json(200, { paused: results });
     }
 
+    // ---- Resume every paused cluster -----------------------------------------
+    // Flips state.json back to "running" under each paused cluster's prefix.
+    // Only clusters in the "paused" state are targeted — anything else is
+    // skipped rather than erroring, so the bulk call is safe to fire against
+    // a mixed fleet. Mirrors pause-all: parallel calls, per-cluster failure
+    // capture, snapshot rebuild fired per cluster so the dashboard reflects
+    // the transition on the next poll.
+    if (method === "POST" && action === "resume-all") {
+      const registry = await readRegistry(BUCKET);
+      const withState = await Promise.all(
+        registry.clusters.map(async (c) => ({ id: c.id, state: await readClusterState(c.id) })),
+      );
+      const targets = withState.filter((c) => c.state === "paused");
+      console.log(`resume-all: ${targets.length} of ${withState.length} clusters to resume`);
+
+      const results = await Promise.all(targets.map(async ({ id }) => {
+        try {
+          await setOperatorState(id, "running", "resume-all");
+          void triggerSnapshotBuild(id);
+          return { id, ok: true as const };
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : String(err);
+          console.error(`resume-all[${id}] failed:`, message);
+          return { id, ok: false as const, error: message };
+        }
+      }));
+
+      return json(200, { resumed: results });
+    }
+
     // ---- Clean environment for one cluster ----------------------------------
     // Archives `environment/{clusterId}/` and `{clusterId}/store/` to
     // history/<ts>/ and removes them from their source locations. Same
@@ -1371,25 +2426,22 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     // ---- Clean environment for every cluster --------------------------------
-    // Archives every registered cluster's env subfolder and store/ to
-    // history/<ts>/, the same way per-cluster clean-env and the start
-    // path do. After archiving, any leftover files directly under
-    // environment/ (rare, but possible via cross-cluster writes) are
-    // wiped so the folder ends up clean. Refuses if any cluster in the
-    // registry is not stopped; frontend owns the confirmation.
+    // Archives stopped clusters' env subfolders and store/ to
+    // history/<ts>/. Running clusters are skipped (not blocked).
+    // After archiving, any leftover orphan files directly under
+    // environment/ that don't belong to a running cluster are wiped.
     if (method === "POST" && action === "clean-env-all") {
       const registry = await readRegistry(BUCKET);
       const withState = await Promise.all(
         registry.clusters.map(async (c) => ({ id: c.id, state: await readClusterState(c.id) })),
       );
+      const stoppedIds = withState.filter((c) => c.state === "stopped").map((c) => c.id);
       const runningIds = withState.filter((c) => c.state !== "stopped").map((c) => c.id);
-      if (runningIds.length > 0) {
-        return json(409, {
-          error: `${runningIds.length} cluster(s) not stopped: ${runningIds.join(", ")}. Stop them before cleaning the environment.`,
-        });
+      if (stoppedIds.length === 0) {
+        return json(200, { archived: 0, skipped: runningIds, message: "No stopped clusters to clean." });
       }
       let archived = 0;
-      for (const { id } of withState) {
+      for (const id of stoppedIds) {
         archived += await archiveClusterToHistory(id, `clean-env-all[${id}]`);
       }
 
@@ -1401,12 +2453,83 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       const legacyArchived = await archiveLegacyStore(`clean-env-all`);
       archived += legacyArchived;
 
-      // Any files left under environment/ after archiving the known
-      // clusters are orphans (unregistered ids or root-level writes).
-      // Wipe them to keep the folder tidy.
+      // Only wipe orphan environment files if ALL clusters are stopped.
+      // If some are still running, just report what was archived.
+      let deleted = 0;
+      if (runningIds.length === 0) {
+        deleted = await deletePrefix("environment/");
+      }
+      console.log(`clean-env-all: archived ${archived} files, swept ${deleted} orphans, skipped ${runningIds.length} running`);
+      return json(200, { archived, deleted, skipped: runningIds });
+    }
+
+    // ---- Clean a specific top-level environment folder -----------------------
+    // POST /cluster/clean-env-folder — archives a single top-level folder under
+    // environment/ (e.g. "environment/my-project/" or "environment/deployed/").
+    // No cluster-state check — the operator makes the call per-folder.
+    if (method === "POST" && action === "clean-env-folder") {
+      const payload = JSON.parse(body ?? "{}");
+      const folder = payload.folder as string;
+      if (!folder || !folder.startsWith("environment/") || !folder.endsWith("/")) {
+        return json(400, { error: "folder must be a path like environment/<name>/" });
+      }
+      // Safety: don't allow cleaning the entire environment/ root
+      const relative = folder.replace("environment/", "");
+      if (!relative || relative === "/") {
+        return json(400, { error: "Use clean-env-all to archive the entire environment" });
+      }
+      const ts = new Date().toISOString().replace(/[:T]/g, "-").replace(/\.\d+Z/, "");
+      const historyPrefix = `history/${ts}/${folder}`;
+      const archived = await copyAndDeletePrefix(folder, historyPrefix);
+      console.log(`clean-env-folder[${folder}]: archived ${archived} files to ${historyPrefix}`);
+      return json(200, { archived, folder });
+    }
+
+    // ---- Delete a specific top-level environment folder ----------------------
+    // POST /cluster/delete-env-folder — permanently deletes a single top-level
+    // folder under environment/ (e.g. "environment/my-project/"). Unlike the
+    // clean-env-folder archive path there is NO copy to history/ — the files
+    // are gone for good. Deletes are pure metadata ops (paginated
+    // ListObjectsV2 + DeleteObjects in 1000-key batches), so this is faster
+    // than an archive of the same folder. The frontend/MCP is expected to
+    // gather explicit confirmation before calling; the backend just validates
+    // the folder shape.
+    if (method === "POST" && action === "delete-env-folder") {
+      const payload = JSON.parse(body ?? "{}");
+      const folder = payload.folder as string;
+      if (!folder || !folder.startsWith("environment/") || !folder.endsWith("/")) {
+        return json(400, { error: "folder must be a path like environment/<name>/" });
+      }
+      // Safety: don't allow deleting the entire environment/ root here.
+      const relative = folder.replace("environment/", "");
+      if (!relative || relative === "/") {
+        return json(400, { error: "Use delete-env-all to delete the entire environment" });
+      }
+      const deleted = await deletePrefix(folder);
+      console.log(`delete-env-folder[${folder}]: permanently deleted ${deleted} files`);
+      return json(200, { deleted, folder });
+    }
+
+    // ---- Delete the entire environment ---------------------------------------
+    // POST /cluster/delete-env-all — permanently deletes everything under
+    // environment/. No history/ copy, no run manifest — irreversible by
+    // design. Refuses unless every registered cluster is stopped, since
+    // running agents may be mid-write in their environment subfolders.
+    if (method === "POST" && action === "delete-env-all") {
+      const registry = await readRegistry(BUCKET);
+      const withState = await Promise.all(
+        registry.clusters.map(async (c) => ({ id: c.id, state: await readClusterState(c.id) })),
+      );
+      const runningIds = withState.filter((c) => c.state !== "stopped").map((c) => c.id);
+      if (runningIds.length > 0) {
+        return json(409, {
+          error: "all clusters must be stopped before deleting the environment",
+          running: runningIds,
+        });
+      }
       const deleted = await deletePrefix("environment/");
-      console.log(`clean-env-all: archived ${archived} files, swept ${deleted} orphans`);
-      return json(200, { archived, deleted });
+      console.log(`delete-env-all: permanently deleted ${deleted} files`);
+      return json(200, { deleted });
     }
 
     // ---- Analyzer: trigger analysis or optimization --------------------------
@@ -1624,6 +2747,16 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       if (!["map", "map-clear", "reduce"].includes(operation.type)) {
         return json(400, { error: `invalid operation type: ${operation.type}` });
       }
+      if (operation.target !== undefined && !["agents", "files"].includes(operation.target)) {
+        return json(400, { error: `invalid target: ${operation.target} (expected "agents" or "files")` });
+      }
+      // File operations are read-only. Fail fast here so the caller gets a 400
+      // instead of an async error surfacing in the tab a second later.
+      if (operation.target === "files" && operation.type !== "reduce") {
+        return json(400, {
+          error: `target "files" is read-only: ${operation.type} is not supported. Use target "agents" to write directives, or env_upload to place files in the environment.`,
+        });
+      }
 
       const engineFn = process.env.MAPREDUCE_ENGINE_FN;
       if (!engineFn) {
@@ -1657,6 +2790,83 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return json(202, { tabId, status: "processing" });
     }
 
+    // ---- Deployment flow routes -------------------------------------------
+    // Runtime approvals were removed: trust is decided at cluster config time
+    // via trustDeploy (pre-trusted marker files written on cluster_start).
+
+    // GET /cluster/deploy/records — list deployment records by systemname
+    if (method === "GET" && action === "deploy/records") {
+      const systemname = event.queryStringParameters?.systemname;
+
+      // If no override provided, try to read from cluster config
+      let effectiveSystemname = systemname;
+      if (!effectiveSystemname) {
+        try {
+          const cfg = await readClusterConfig(BUCKET, clusterId);
+          effectiveSystemname = (cfg as unknown as Record<string, unknown>).systemname as string | undefined;
+        } catch { /* no config */ }
+      }
+
+      const records = await deploymentService.listRecords(BUCKET, effectiveSystemname);
+      return json(200, { records });
+    }
+
+    // ---- Forge (monitoring dashboard) -------------------------------------
+
+    if (method === "POST" && path === "/forge/metrics") {
+      const payload = JSON.parse(body ?? "{}");
+      const group = payload.group || null;
+      const range = payload.timeRange || "1h";
+      const result = await handleMetrics(group, range);
+      return json(200, result);
+    }
+
+    if (method === "POST" && path === "/forge/layout") {
+      const payload = JSON.parse(body ?? "{}");
+      const group = payload.group || null;
+      const result = await handleLayout(group);
+      return json(200, result);
+    }
+
+    if (method === "POST" && path === "/forge/status-report") {
+      const payload = JSON.parse(body ?? "{}");
+      const group = payload.group || null;
+      const result = await handleStatusReport(group);
+      return json(200, result);
+    }
+
+    // POST /forge/stack-info — stack name/status + deployer cluster states for
+    // the destroy confirmation dialog.
+    if (method === "POST" && path === "/forge/stack-info") {
+      const payload = JSON.parse(body ?? "{}");
+      const group = payload.group || null;
+      const result = await handleStackInfo(group);
+      return json(result.error ? 404 : 200, result);
+    }
+
+    // POST /forge/destroy — delete the CloudFormation stack backing a
+    // deployment group. Irreversible; confirmation is gathered client-side
+    // (typed phrase in the dashboard, confirm parameter in the MCP). No
+    // cluster-state gate — a running deployer is warned about, not blocked on.
+    if (method === "POST" && path === "/forge/destroy") {
+      const payload = JSON.parse(body ?? "{}");
+      const group = payload.group || null;
+      const result = await handleDestroy(group);
+      if (result.error) return json(404, result);
+      console.log(`forge/destroy[${group ?? "default"}]: DeleteStack ${result.stackName}`);
+      return json(200, result);
+    }
+
+    // POST /forge/cache-clear — delete the cached layout so next load regenerates
+    if (method === "POST" && path === "/forge/cache-clear") {
+      const payload = JSON.parse(body ?? "{}");
+      const group = payload.group || "default";
+      const cacheKey = `store/forge/${group}/layout.json`;
+      try {
+        await s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: cacheKey }));
+      } catch { /* ignore if not found */ }
+      return json(200, { cleared: cacheKey });
+    }
 
     return json(404, { error: "not found" });
   } catch (err: unknown) {

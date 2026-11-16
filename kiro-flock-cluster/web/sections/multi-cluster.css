@@ -1,0 +1,830 @@
+/* ============================================================================
+   Multi Cluster section (ported WeltenBuilder board).
+
+   Scoped to #pane-multi-cluster inside the unified shell. Design tokens
+   come from shell.css :root. Chrome (topbar, env column, analyzer drawer,
+   toast, confirm modal) is shell-owned; this file keeps only the cluster
+   board: cards, group frames, direction popup, and the algorithm accent
+   scopes the cards use.
+   ============================================================================ */
+
+/* Scrollable board area filling the accordion pane. */
+.wb-pane {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+  padding: 16px 20px;
+  background: var(--bg);
+}
+/* Legacy classes still referenced from generic button usage. */
+.wb-btn {
+  padding: 6px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-family: var(--sans);
+  font-size: 13px;
+  font-weight: 500;
+  background: var(--surface-2);
+  color: var(--text);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.wb-btn:hover:not(:disabled) { border-color: var(--border-light); }
+.wb-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.wb-btn-ghost { background: var(--surface-2); color: var(--text-muted); }
+.wb-btn-ghost:hover:not(:disabled) { color: var(--text); }
+.wb-btn-danger-solid {
+  background: var(--red);
+  color: #1a0a0a;
+  border-color: var(--red);
+}
+.wb-btn-danger-solid:hover:not(:disabled) {
+  background: #ff8595;
+  border-color: #ff8595;
+}
+
+.wb-muted { color: var(--text-muted); font-size: 12px; }
+
+/* ---------- Per-algorithm theme scopes ------------------------------------
+   Applied to cluster cards and the drill-down header/body so each cluster
+   carries its algorithm's accent. App chrome (topbar, env panel, resize
+   handle) stays amorphous purple so the two apps feel like one product.
+
+   Palette echoes the dashboard's body[data-algorithm=...] scheme but
+   overrides only --accent, --accent-hover, --accent-dim. The rest of the
+   theme variables stay at their root (dark) values so a swarm card still
+   reads as dark-themed. */
+.wb-algo--amorphous {
+  --accent: #9046ff;
+  --accent-hover: #a060ff;
+  --accent-dim: rgba(144, 70, 255, 0.18);
+}
+.wb-algo--mesh {
+  --accent: #d85a49;
+  --accent-hover: #e8705f;
+  --accent-dim: rgba(216, 90, 73, 0.18);
+}
+.wb-algo--swarm {
+  --accent: #6aa6d6;
+  --accent-hover: #7cb5df;
+  --accent-dim: rgba(106, 166, 214, 0.18);
+}
+
+/* Pass 8: single-agent mode card tint. Mirrors the dashboard's grey
+   background + dark green accent. */
+.wb-algo--single {
+  /* Brightened from the old #2d6a4f — as card text on the dark theme
+     that green sat well under readable contrast. */
+  --accent: #3d8a6a;
+  --accent-hover: #4dab85;
+  --accent-dim: rgba(61, 138, 106, 0.22);
+}
+
+/* ---------- Cluster grid --------------------------------------------------
+   The board is laid out by Packery (metafizzy), a bin-packing library
+   loaded from CDN. Packery fills gaps regardless of item size, so the
+   mix of 280px cards, small collapsed group frames, and wider expanded
+   group frames packs tightly with no wasted space — which plain flexbox
+   or CSS Grid can't do (both leave dead space under short items sharing
+   a row with a tall one). Packery absolutely-positions each item and
+   sets the container height itself; app.js re-runs its layout after every
+   poll re-render.
+
+   The flexbox rules below are a graceful fallback: if Packery's CDN
+   script fails to load, the fixed-width items still arrange in wrapping
+   rows (with the old row-gap limitation, but functional). Once Packery
+   initialises it positions items absolutely and these flex rules no
+   longer apply. */
+
+.wb-cluster-stacks {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 20px;
+  padding-bottom: 12px;
+}
+
+.wb-cluster-stack {
+  position: relative;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 150px;
+  /* Fixed width. Packery reads each item's offsetWidth to bin-pack, so a
+     concrete pixel width is required (a flex-basis wouldn't survive the
+     switch off flex layout). 280px is the base unit the whole board is
+     built from: cards are 1 unit, expanded group frames are N units.
+     flex: 0 0 auto keeps this exact width in the plain-flexbox fallback
+     that renders before/if Packery's CDN script hasn't loaded. */
+  width: 280px;
+  flex: 0 0 auto;
+  cursor: pointer;
+  /* No `transform` in the transition or hover: Packery drives each item's
+     position via an inline transform, so a CSS transform here would
+     clobber the packed position (item would jump to 0,0 on hover). Hover
+     affordance is border-color only. */
+  transition: border-color 0.15s;
+  z-index: 1;
+}
+/* Stacked-card effect: two offset pseudo-layers behind the main card. */
+.wb-cluster-stack::before,
+.wb-cluster-stack::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  z-index: -1;
+  pointer-events: none;
+}
+.wb-cluster-stack::before {
+  transform: translate(5px, 5px);
+}
+.wb-cluster-stack::after {
+  transform: translate(10px, 10px);
+}
+/* The "+" new-cluster card should not have the stack effect. */
+.wb-cluster-stack-new::before,
+.wb-cluster-stack-new::after {
+  display: none;
+}
+.wb-cluster-stack:hover {
+  border-color: var(--accent);
+}
+.wb-cluster-stack:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-dim);
+}
+
+/* Cards rendered from localStorage cache before the first real poll.
+   Dimmed so the operator knows the data is potentially stale; the
+   .wb-poll-indicator in the header explains the dimming. Cleared by
+   the first successful pollClusters() response. */
+.wb-cluster-stack.wb-stale {
+  opacity: 0.55;
+  filter: saturate(0.7);
+}
+
+.wb-stack-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+.wb-stack-header-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.wb-stack-name {
+  font-family: var(--mono);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--accent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.wb-stack-algo {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: lowercase;
+}
+
+/* Pass 8: directive presence pill on the cluster card. Lit when at least
+   one agent in the cluster has a per-agent directive (operator-issued
+   or self-optimization log). Visual matches the dashboard's
+   .directive-pill so the affordance is consistent across both views. */
+.wb-stack-directive-pill {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: var(--accent-dim);
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  white-space: nowrap;
+}
+
+/* Mixed-models pill. Lit when at least one agent is pinned to a model other
+   than the cluster baseline, so the card's single algorithm/model reading
+   isn't mistaken for the whole picture. Matches the dashboard's .model-pill
+   (single-cluster.css): muted rather than accent, because it reports a fact
+   and is not an affordance. */
+.wb-stack-model-pill {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: var(--surface-2);
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+/* Cluster state badge, same shape as the dashboard's .badge. */
+.wb-stack-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 20px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  flex-shrink: 0;
+}
+.wb-stack-state::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+.wb-state--running { background: var(--green-dim); color: var(--green); }
+.wb-state--running::before { background: var(--green); box-shadow: 0 0 8px var(--green); }
+.wb-state--starting { background: var(--accent-dim); color: var(--accent); }
+.wb-state--starting::before { background: var(--accent); animation: wb-pulse 1.5s ease-in-out infinite; }
+.wb-state--stopping { background: var(--red-dim); color: var(--red); }
+.wb-state--stopping::before { background: var(--red); animation: wb-pulse 1.5s ease-in-out infinite; }
+.wb-state--stopped { background: var(--surface-2); color: var(--text-muted); }
+.wb-state--stopped::before { background: var(--text-muted); }
+.wb-state--paused { background: var(--yellow-dim); color: var(--yellow); }
+.wb-state--paused::before { background: var(--yellow); }
+.wb-state--unknown { background: var(--surface-2); color: var(--text-muted); }
+.wb-state--unknown::before { background: var(--text-muted); }
+
+@keyframes wb-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+.wb-stack-direction {
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.5;
+  min-height: 18px;
+}
+
+.wb-stack-config {
+  display: flex;
+  gap: 8px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  flex-wrap: wrap;
+}
+.wb-stack-config-label {
+  color: var(--text-muted);
+  margin-right: 2px;
+}
+.wb-stack-config-sep { color: var(--border-light); }
+
+/* Per-cluster "last update" line — agent id, relative time, action.
+   Sits between the direction preview and the config summary so the
+   operator can see at a glance whether the cluster is actually doing
+   anything without having to drill in. Backed by ListObjectsV2 +
+   ranged GetObject in /cluster/list, so it stays fast at any cluster
+   count. */
+.wb-stack-last {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.wb-stack-last-agent { color: var(--accent); font-weight: 600; }
+.wb-stack-last-ago { color: var(--text-dim); }
+.wb-stack-last-sep { color: var(--border-light); }
+.wb-stack-last-action {
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
+}
+.wb-stack-last--empty { font-style: italic; color: var(--text-muted); }
+
+/* Per-card action buttons: Start / Stop / Pause / Send. Small, tight, same
+   visual language as the dashboard's controls bar but miniaturised. */
+.wb-stack-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: auto;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+.wb-stack-btn {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 8px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text-dim);
+  font-family: var(--sans);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.1s, border-color 0.1s, color 0.1s;
+}
+.wb-stack-btn:hover:not(:disabled) {
+  border-color: var(--border-light);
+  color: var(--text);
+}
+.wb-stack-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.wb-stack-btn--stop { color: var(--red); }
+.wb-stack-btn--stop:hover:not(:disabled) {
+  background: var(--red-dim);
+  border-color: var(--red);
+  color: var(--red);
+}
+.wb-stack-btn--pause { color: var(--yellow); }
+.wb-stack-btn--pause:hover:not(:disabled) {
+  background: var(--yellow-dim);
+  border-color: var(--yellow);
+  color: var(--yellow);
+}
+.wb-stack-btn--send { color: var(--accent); }
+.wb-stack-btn--send:hover:not(:disabled) {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.wb-cluster-stack-new {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  flex-direction: column;
+  /* Same fixed 280px base unit as a real cluster card — it's "one more
+     slot the size of the others", packed by Packery like any card. */
+  width: 280px;
+  flex: 0 0 auto;
+  background: var(--surface);
+  border: 1px dashed var(--border);
+  color: var(--text-muted);
+  min-height: 150px;
+  /* No transform hover — same Packery-positioning reason as .wb-cluster-stack. */
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+.wb-cluster-stack-new:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--surface-2);
+}
+.wb-cluster-stack-new-plus {
+  font-size: 28px;
+  font-weight: 300;
+  line-height: 1;
+}
+.wb-cluster-stack-new-label {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+/* ---------- Deployment group folders --------------------------------------
+   Clusters sharing a config `everforgeGroup` (the deployment group) render inside a bordered
+   "folder" frame instead of as loose cards.
+
+   The board is flexbox-wrap (see .wb-cluster-stacks above), so collapsed
+   frames are just another flex item: they claim only the width their
+   member row actually needs (up to a cap) and wrap next to cards or
+   other collapsed frames whenever there's room, or drop to their own
+   line when there isn't — the same responsive behaviour as the cards
+   around them, not a fixed slot. No member name is ever truncated: each
+   mini-card sizes to its content via max-content, and the frame grows
+   to fit.
+
+   Expanded: becomes a full-width block (flex-basis 100%) and shows the
+   full-size cluster cards in their own wrapping row inside the border. */
+.wb-group-frame {
+  position: relative;
+  border: 1px dashed var(--border-light);
+  border-radius: var(--radius-lg);
+  background: rgba(255, 255, 255, 0.015);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 1;
+}
+/* Group frames are Packery items too. flex: 0 0 auto pins their width in
+   the flexbox fallback; Packery bin-packs them by offsetWidth otherwise. */
+.wb-group-frame {
+  flex: 0 0 auto;
+}
+/* Collapsed: size to the mini-card content, but cap the width so a large
+   group wraps its mini-card row onto more lines instead of growing into
+   one very wide box. min-width keeps a single-member group from looking
+   cramped. Never truncates — a long name just widens the frame up to the
+   cap, then wraps. */
+.wb-group-frame--collapsed {
+  min-height: 150px;
+  width: max-content;
+  min-width: 200px;
+  max-width: 600px;
+}
+/* Expanded: shrink-wrap the frame to its inner card row (whose width is
+   set exactly in JS for N columns) plus this padding and the border. Using
+   fit-content lets the browser add padding/border around the fixed body
+   width, so the frame is never a couple of pixels too narrow — which would
+   wrap the last card and strand a whole empty column on the right. Extra
+   breathing room between border and cards vs. the collapsed frame's tight
+   mini-card row. */
+.wb-group-frame:not(.wb-group-frame--collapsed) {
+  width: fit-content;
+  padding: 16px;
+  gap: 12px;
+}
+/* The frame itself is a plain box, not a stack — it holds a variable
+   number of members, so it doesn't get the deck-of-cards effect. That
+   effect lives on each individual member mini-card below, since a
+   member IS an actual cluster (a stack of agent nodes). */
+
+/* The header is a plain row: the collapse affordance is .wb-group-toggle on
+   the left, the group bulk controls are .wb-group-actions on the right.
+   Splitting them keeps the action buttons out of an interactive ancestor. */
+.wb-group-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.wb-group-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
+  cursor: pointer;
+  user-select: none;
+  border-radius: var(--radius);
+  padding: 2px 4px;
+}
+.wb-group-toggle:hover { background: var(--surface-2); }
+.wb-group-toggle:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--accent-dim);
+}
+.wb-group-chevron {
+  color: var(--text-muted);
+  font-size: 11px;
+  width: 12px;
+  text-align: center;
+  flex-shrink: 0;
+}
+.wb-group-name {
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.wb-group-count {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+/* Flags are pushed to the right edge of the toggle region, so they land
+   just left of the group action buttons. */
+.wb-group-flag {
+  font-size: 11px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.wb-group-flag--error { color: var(--red); }
+.wb-group-flag--running {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 8px var(--green);
+  margin-left: auto;
+  flex-shrink: 0;
+}
+/* When both flags are present, only the first should claim margin-left:
+   auto so they sit together at the right edge. */
+.wb-group-flag--error + .wb-group-flag--running { margin-left: 0; }
+
+/* Group-scoped bulk controls (Pause / Resume / Stop), pinned to the right
+   of the group header, as a sibling of .wb-group-toggle. Same visual
+   language as the per-card .wb-stack-btn row, one step smaller: these act
+   on every eligible member of the folder at once. */
+.wb-group-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.wb-group-btn {
+  padding: 3px 8px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text-dim);
+  font-family: var(--sans);
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: background 0.1s, border-color 0.1s, color 0.1s;
+}
+.wb-group-btn:hover:not(:disabled) {
+  border-color: var(--border-light);
+  color: var(--text);
+}
+.wb-group-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--accent-dim);
+}
+.wb-group-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+.wb-group-btn--pause { color: var(--yellow); }
+.wb-group-btn--pause:hover:not(:disabled) {
+  background: var(--yellow-dim);
+  border-color: var(--yellow);
+  color: var(--yellow);
+}
+.wb-group-btn--resume { color: var(--green); }
+.wb-group-btn--resume:hover:not(:disabled) {
+  background: var(--green-dim);
+  border-color: var(--green);
+  color: var(--green);
+}
+.wb-group-btn--stop { color: var(--red); }
+.wb-group-btn--stop:hover:not(:disabled) {
+  background: var(--red-dim);
+  border-color: var(--red);
+  color: var(--red);
+}
+
+/* Collapsed state: a wrapping row of mini-cards, one per member. Each
+   mini-card carries the same offset "deck of cards" pseudo-layers as a
+   full .wb-cluster-stack, scaled down — the stack visual belongs on the
+   thing that IS a stack (a cluster of agent nodes), not on the folder
+   that groups several of them. No name is ever truncated: mini-cards
+   size to their content (max-content) and the row wraps, so a long
+   cluster name just makes that one card wider. */
+.wb-group-members {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 14px;
+  /* Room for the 6px offset deck layer on the right/bottom-most
+     mini-cards so it doesn't get visually clipped by the frame edge. */
+  padding-right: 6px;
+  padding-bottom: 6px;
+}
+.wb-group-member {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  width: max-content;
+  min-width: 96px;
+  cursor: pointer;
+  transition: border-color 0.1s, transform 0.1s;
+  z-index: 1;
+}
+/* Mini deck-of-cards effect, same technique as .wb-cluster-stack but at
+   3px/6px offsets instead of 5px/10px to match the smaller card. */
+.wb-group-member::before,
+.wb-group-member::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  z-index: -1;
+  pointer-events: none;
+}
+.wb-group-member::before { transform: translate(3px, 3px); }
+.wb-group-member::after { transform: translate(6px, 6px); }
+.wb-group-member:hover {
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+.wb-group-member:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-dim);
+}
+/* The "+N more" tile is a summary label, not a clickable target and not
+   a stack of its own — no hover/focus affordance, no deck effect. */
+.wb-group-member--more,
+.wb-group-member--more:hover {
+  cursor: default;
+  border-color: var(--border);
+  border-style: dashed;
+  transform: none;
+}
+.wb-group-member--more::before,
+.wb-group-member--more::after {
+  display: none;
+}
+/* Reuse the algorithm accent classes for a subtle left-edge tint. */
+.wb-group-member.wb-algo--amorphous,
+.wb-group-member.wb-algo--mesh,
+.wb-group-member.wb-algo--swarm,
+.wb-group-member.wb-algo--single {
+  border-left: 3px solid var(--accent);
+}
+.wb-group-member-top {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+.wb-group-member-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  align-self: center;
+}
+.wb-group-member-dot.wb-state--running { background: var(--green); box-shadow: 0 0 6px var(--green); }
+.wb-group-member-dot.wb-state--starting,
+.wb-group-member-dot.wb-state--stopping { background: var(--accent); }
+.wb-group-member-dot.wb-state--paused { background: var(--yellow); }
+.wb-group-member-dot.wb-state--stopped,
+.wb-group-member-dot.wb-state--unknown { background: var(--text-muted); }
+.wb-group-member-name {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.wb-group-member-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.wb-group-member-nodes { color: var(--text-muted); }
+.wb-group-member-metasep { color: var(--border-light); }
+.wb-group-member-fresh { color: var(--text-muted); }
+.wb-group-member--more {
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  min-height: 100%;
+}
+
+/* Expanded state: full-size cards in their own row inside the frame.
+   Flex-wrap, matching .wb-cluster-stacks, not CSS Grid — grid's `1fr`
+   tracks stretch cards to fill leftover row width (e.g. 2 members in a
+   wide frame become 2 oversized cards instead of 2 normal ones sitting
+   next to empty space). Flex items keep the same natural card width and
+   just wrap. .wb-cluster-stack already carries its own sizing
+   (flex: 0 1 280px), so no extra basis is needed here. */
+.wb-group-body {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 20px;
+}
+
+/* ---------- Environment panel host ---------------------------------------
+   The panel contents come from web-shared/envPanel.{js,css}. Only the
+   host container's border + background live here so WeltenBuilder's own
+   chrome remains consistent. .wb-main-right controls width/resize. */
+
+/* ---------- Confirm dialog (Stop All, Pause All, Clean Environment) ------ */
+
+.wb-confirm {
+  position: fixed;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 950;
+}
+.wb-confirm.visible { display: flex; }
+.wb-confirm-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+}
+.wb-confirm-panel {
+  position: relative;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  width: min(520px, 92vw);
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+.wb-confirm-header {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.wb-confirm-title {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--accent);
+  font-weight: 600;
+}
+.wb-confirm-body {
+  padding: 16px;
+  overflow-y: auto;
+  flex: 1;
+  color: var(--text-dim);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.wb-confirm-footer {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* ---------- Direction popup (show all) ------------------------------------- */
+
+.wb-stack-direction-more {
+  display: inline;
+  font-size: 11px;
+  color: var(--accent);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.wb-stack-direction-more:hover { text-decoration: underline; }
+
+.wb-dir-popup {
+  position: fixed;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 940;
+}
+.wb-dir-popup.visible { display: flex; }
+.wb-dir-popup-panel {
+  position: relative;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  width: min(680px, 92vw);
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+.wb-dir-popup-panel .wb-confirm-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.wb-dir-popup-close {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 20px;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+}
+.wb-dir-popup-close:hover { color: var(--text); }
+.wb-dir-popup-body {
+  padding: 16px;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+}

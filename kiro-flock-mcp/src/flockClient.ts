@@ -20,14 +20,51 @@
 export interface ClusterConfig {
   concurrency: number;
   neighbourRadius: number;
+  /** Agent compute backend: "ec2" (default, one instance per agent) or
+   *  "ecs" (one Fargate ARM64 task per agent). Restart-required. */
+  computeType?: "ec2" | "ecs";
+  /** EC2 instance type. Only consulted when computeType is "ec2". */
   instanceType: string;
+  /** Fargate task size. Only consulted when computeType is "ecs".
+   *  small = 2 vCPU/4 GiB, medium = 4/8 (default), large = 8/16,
+   *  xlarge = 16/32. Restart-required. */
+  taskSize?: "small" | "medium" | "large" | "xlarge";
   loopIntervalSeconds: number;
+  /** Model the agents run under. `null` means "use kiro-cli's default".
+   *  Reloads dynamically between iterations. */
   model: string | null;
   /** Pass 7: coordination algorithm. "amorphous" (ring), "mesh" (all),
-   *  or "swarm" (K most recently active). */
-  algorithm: "amorphous" | "mesh" | "swarm";
+   *  "swarm" (K most recently active), or "single" (lone agent, no peers). */
+  algorithm: "amorphous" | "mesh" | "swarm" | "single";
   /** Pass 7: peer count for swarm algorithm. Ignored otherwise. */
   swarmK: number;
+  /** Pass 8: when true, agents append a self-reflection block to their
+   *  own per-agent directive after each iteration. */
+  selfOptimizing?: boolean;
+  /** When true, agents get a Puppeteer MCP server for headless browser
+   *  automation. */
+  browserAutomation?: boolean;
+  /** Per-agent model overrides, keyed by agent index as a string. Sparse:
+   *  an agent with no key follows the cluster-wide `model`, while an explicit
+   *  null pins it to kiro-cli's own default. Reloads dynamically. */
+  models?: Record<string, string | null>;
+}
+
+/** One entry in the deployment's model catalog. `model_id` is the value that
+ *  goes into config (and becomes kiro-cli's `--model`); the rest is metadata
+ *  for choosing between them. */
+export interface ModelCatalogEntry {
+  model_id: string;
+  model_name?: string;
+  description?: string;
+  context_window_tokens?: number;
+}
+
+export interface ModelCatalog {
+  models: ModelCatalogEntry[];
+  /** What kiro-cli uses when no `--model` flag is passed, i.e. what a null
+   *  model resolves to. Null when the catalog doesn't record it. */
+  default_model?: string | null;
 }
 
 export interface AgentLogEntry {
@@ -52,6 +89,15 @@ export interface ClusterStatus {
   state: "stopped" | "starting" | "running" | "stopping" | "paused";
   agents: AgentStatus[];
   config: ClusterConfig;
+  /** Populated when the last start failed to launch instances (e.g.
+   *  InsufficientInstanceCapacity or any non-throttle RunInstances error).
+   *  The cluster is rolled back to "stopped" and this carries the cause so
+   *  the operator can see why the launch hung. Null on a healthy cluster
+   *  and cleared on the next start attempt. */
+  lastError?: { code: string; message: string; at: string } | null;
+  /** The reason recorded on the current state transition (e.g.
+   *  "launch-failed", "manual", "autopause"). Informational. */
+  stateReason?: string | null;
 }
 
 export interface HabitatFile {
@@ -84,9 +130,21 @@ export interface CompletionResult {
 export interface ClusterRegistryEntry {
   id: string;
   name: string;
-  algorithm: "amorphous" | "mesh" | "swarm";
+  algorithm: "amorphous" | "mesh" | "swarm" | "single";
   createdAt: string;
   state?: "stopped" | "starting" | "running" | "stopping" | "paused";
+  /** Pass 8: true if any agent in the cluster has a per-agent directive
+   *  set. Surfaced for WeltenBuilder so it can show a single pill on the
+   *  cluster card without an extra fetch. */
+  hasAnyDirective?: boolean;
+  /** How many agents in the cluster run a model other than the cluster-wide
+   *  baseline (i.e. the size of the config's `models` override map). 0 or
+   *  absent means the whole flock is on one model. */
+  modelOverrideCount?: number;
+  /** Populated when this cluster's last start failed to launch (e.g.
+   *  InsufficientInstanceCapacity). The cluster reads as "stopped" but
+   *  carries the failure cause. Null/absent on a healthy cluster. */
+  lastError?: { code: string; message: string; at: string } | null;
 }
 
 export interface ClusterListResult {
@@ -212,6 +270,13 @@ export class FlockClient {
     return this.request<ClusterConfig>("PUT", this.clusterPath("config", clusterId), partial);
   }
 
+  /** The deployment's model catalog. Global, not per-cluster: it reflects
+   *  what the agents' kiro-cli build supports, baked to
+   *  `config/models.json` by install.sh. Cached 5 minutes server-side. */
+  async listModels(): Promise<ModelCatalog> {
+    return this.request<ModelCatalog>("GET", "/cluster/models");
+  }
+
   // ── Direction ────────────────────────────────────────────────────────────
 
   async getDirection(clusterId?: string): Promise<string> {
@@ -254,6 +319,44 @@ export class FlockClient {
     return String(res);
   }
 
+  /**
+   * Permanently delete one environment folder (e.g. "environment/cluster_0/"
+   * or "environment/<group>/<clusterId>/"). No history/ copy is made — the
+   * backend runs a pure ListObjectsV2 + DeleteObjects sweep. Irreversible.
+   */
+  async deleteEnvironmentFolder(folder: string): Promise<{ deleted: number; folder: string }> {
+    return this.request<{ deleted: number; folder: string }>(
+      "POST",
+      "/cluster/delete-env-folder",
+      { folder },
+    );
+  }
+
+  // ── Continuous deployment (forge) ─────────────────────────────────────────
+
+  /**
+   * Stack name/status backing a deployment group, plus the state of every
+   * cluster bound to the group via everforgeGroup. `group` null targets the
+   * ungrouped environment/deployed/ record.
+   */
+  async stackInfo(group: string | null): Promise<{
+    stackName: string | null;
+    stackStatus: string | null;
+    clusters: { id: string; name: string; state: string }[];
+    deployerRunning: boolean;
+    error?: string;
+  }> {
+    return this.request("POST", "/forge/stack-info", { group });
+  }
+
+  /**
+   * Delete the CloudFormation stack backing a deployment group. Irreversible.
+   * The caller is responsible for gathering confirmation first.
+   */
+  async destroyStack(group: string | null): Promise<{ stackName: string; status: string }> {
+    return this.request("POST", "/forge/destroy", { group });
+  }
+
   // ── Knowledge-base (persistent, shared across all clusters) ─────────────
   //
   // Knowledge-base is a single shared resource. No cluster suffix.
@@ -284,6 +387,8 @@ export class FlockClient {
   // the artifact is still being built. On "ready", this method fetches the
   // artifact directly, decompresses it, and parses it into the same shape
   // StoreReader.readAllLogs() produces today.
+  //
+  // Server side is not built yet. See kiro-flock/tasks.md Pass 5.
   async fetchAnalysisViaUrl(clusterId?: string): Promise<AnalysisFetchResult> {
     const token = await this.auth.getToken();
     const path = this.clusterPath("analysis", clusterId);
@@ -426,6 +531,18 @@ export class FlockClient {
 
       await sleep(pollIntervalMs);
     }
+  }
+
+  // ── Deployment flow (operator-side) ──────────────────────────────────────
+  // Runtime approvals were removed: trust is decided at cluster config time
+  // via trustDeploy. Only deployment-record browsing remains.
+
+  async deployRecordList(
+    systemname?: string,
+    clusterId?: string,
+  ): Promise<{ records: unknown[] }> {
+    const qs = systemname ? `?systemname=${encodeURIComponent(systemname)}` : "";
+    return this.request("GET", this.clusterPath(`deploy/records${qs}`, clusterId));
   }
 }
 

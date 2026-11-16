@@ -1,25 +1,52 @@
 # Machine-specific config
 install.config
 
+# CDK context cache. Every entry is keyed by AWS account, so a clone deploying
+# into a different account can never hit the entries cached here; the file
+# offers other deployers nothing and only accumulates the author's account id,
+# AZ lists and hosted zone ids. CDK's own advice is to commit it, which assumes
+# an app with fixed target accounts and a pipeline synthesising it. kiro-flock
+# is cloned and deployed into the reader's own account, so that does not apply.
+# It was already being stripped by hand before each public release; ignoring it
+# makes that structural instead of a step someone has to remember.
+# Regenerated automatically on the next synth from live credentials.
+cdk.context.json
+
 # Dependencies
 node_modules/
 
 # Build output
 dist/
 cdk.out/
-cdk.context.json
 *.js.map
 
 # Environment / secrets
 .env
+.aga.config.json
 
 # IDE
 .vscode/
 .playwright-mcp/
-.kiro/
+.kiro/settings/
+
+# Security scan outputs
+holmes-results/
+retire-results/
+retire.json
+retire-output.json
+retirejs-results/
+scan-results/
+security-results/
+scan-report.json
+scan-resolution.md
 
 # Scratch
 .scratch/
+
+# MCP project specifics
+kiro-flock-mcp/test/
+kiro-flock-mcp/language-instructions.md
+kiro-flock-mcp/skills/flockpost/
 
 # OS
 .DS_Store

@@ -11,10 +11,12 @@
  *     agents/
  *       prompts/
  *         agent-loop.md         (base prompt read at runtime)
+ *         self-optimizing-on.md (Pass 8 self-optimization fragment)
  *         algorithms/
  *           amorphous.md        (Pass 7 per-algorithm fragments)
  *           mesh.md
  *           swarm.md
+ *           single.md           (Pass 8 lone-agent algorithm)
  *
  * The prompts/ tree is copied recursively so the base prompt and the
  * per-algorithm fragments travel together. Adding a new fragment file is
@@ -51,6 +53,12 @@ esbuild.buildSync({
   ...sharedBuildOpts,
   entryPoints: [path.join(repoRoot, 'agent', 's3Mcp.ts')],
   outfile: path.join(outDir, 'agent', 's3Mcp.js'),
+});
+
+esbuild.buildSync({
+  ...sharedBuildOpts,
+  entryPoints: [path.join(repoRoot, 'agent', 'deployMcp.ts')],
+  outfile: path.join(outDir, 'agent', 'deployMcp.js'),
 });
 
 /** Recursively copy a directory tree. Node 20 has fs.cpSync, use it. */

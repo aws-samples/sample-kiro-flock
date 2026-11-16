@@ -61,7 +61,7 @@ Respond with ONLY valid JSON matching this exact schema (no markdown fences, no 
       "role": "<short role description, e.g. 'Platform Standards', 'Auth Implementation', 'QA'>",
       "team": "<team metaphor, e.g. 'Backend Team', 'Security Team', 'Integration'>",
       "state": "<running|paused|stopped|starting>",
-      "algorithm": "<amorphous|mesh|swarm>",
+      "algorithm": "<amorphous|mesh|swarm|single>",
       "agentCount": <number>,
       "artefacts": [
         {

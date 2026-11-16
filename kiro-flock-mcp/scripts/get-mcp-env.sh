@@ -34,6 +34,23 @@ if [[ -n "$PROFILE" ]]; then
   AWS="aws --profile $PROFILE"
 fi
 
+# to_native_path — emit a path in the OS-native form the *consumer* expects.
+#
+# The mcp.json this script writes is read by the native Windows toolchain:
+# the Windows `node` that launches the MCP server, and (for the config file
+# itself) the Windows python that writes it. Under Git Bash/MSYS, shell paths
+# look like `/c/Users/...`, which those native programs misresolve. `cygpath -w`
+# converts to `C:\Users\...`. On Linux/macOS there is no cygpath and paths are
+# already native, so this is a transparent pass-through. Use it for any path
+# that will be handed to a native (non-MSYS) program.
+to_native_path() {
+  if command -v cygpath >/dev/null 2>&1; then
+    cygpath -w "$1"
+  else
+    printf '%s' "$1"
+  fi
+}
+
 echo "Fetching CloudFormation outputs from stack: $STACK_NAME (region: $REGION)..."
 
 OUTPUTS=$($AWS cloudformation describe-stacks \
@@ -52,6 +69,9 @@ BUCKET_NAME=$(get_output "BucketName")
 USER_POOL_ID=$(get_output "UserPoolId")
 CLIENT_ID=$(get_output "UserPoolClientId")
 COGNITO_DOMAIN=$(get_output "CognitoDomain")
+# ECS compute backend (empty on stacks that predate it). Used by the MCP's
+# stream_acp / list_acp_sessions to reach Fargate agents via ECS Exec.
+ECS_CLUSTER_ARN=$(get_output "EcsClusterArn")
 
 if [[ -z "$API_URL" || -z "$BUCKET_NAME" ]]; then
   echo "ERROR: Could not find required outputs in stack $STACK_NAME."
@@ -75,8 +95,9 @@ CURRENT_CLIENT=$($AWS cognito-idp describe-user-pool-client \
 
 CURRENT_FLOWS=$(echo "$CURRENT_CLIENT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(json.dumps(d.get('ExplicitAuthFlows') or []))")
 
-if ! echo "$CURRENT_FLOWS" | grep -q "ALLOW_ADMIN_USER_PASSWORD_AUTH"; then
-  echo "Enabling ADMIN_USER_PASSWORD_AUTH on Cognito client..."
+if ! echo "$CURRENT_FLOWS" | grep -q "ALLOW_ADMIN_USER_PASSWORD_AUTH" \
+   || ! echo "$CURRENT_FLOWS" | grep -q "ALLOW_USER_PASSWORD_AUTH"; then
+  echo "Enabling ADMIN_USER_PASSWORD_AUTH and USER_PASSWORD_AUTH on Cognito client..."
 
   CALLBACK_URLS=$(echo "$CURRENT_CLIENT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(' '.join(d.get('CallbackURLs') or []))")
   LOGOUT_URLS=$(echo "$CURRENT_CLIENT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(' '.join(d.get('LogoutURLs') or []))")
@@ -89,17 +110,20 @@ if ! echo "$CURRENT_FLOWS" | grep -q "ALLOW_ADMIN_USER_PASSWORD_AUTH"; then
     --region "$REGION"
     --user-pool-id "$USER_POOL_ID"
     --client-id "$CLIENT_ID"
-    --explicit-auth-flows ALLOW_USER_SRP_AUTH ALLOW_REFRESH_TOKEN_AUTH ALLOW_ADMIN_USER_PASSWORD_AUTH
+    --explicit-auth-flows ALLOW_USER_SRP_AUTH ALLOW_USER_PASSWORD_AUTH ALLOW_REFRESH_TOKEN_AUTH ALLOW_ADMIN_USER_PASSWORD_AUTH
     --id-token-validity 24
     --access-token-validity 24
     --refresh-token-validity 7
     --token-validity-units '{"IdToken":"hours","AccessToken":"hours","RefreshToken":"days"}'
   )
-  [[ -n "$CALLBACK_URLS" ]] && ARGS+=(--callback-urls $CALLBACK_URLS)
-  [[ -n "$LOGOUT_URLS" ]]   && ARGS+=(--logout-urls $LOGOUT_URLS)
-  [[ -n "$OAUTH_FLOWS" ]]   && ARGS+=(--allowed-o-auth-flows $OAUTH_FLOWS)
-  [[ -n "$OAUTH_SCOPES" ]]  && ARGS+=(--allowed-o-auth-scopes $OAUTH_SCOPES)
-  [[ -n "$IDPS" ]]          && ARGS+=(--supported-identity-providers $IDPS)
+  # Each list is space-separated (none of these values may contain spaces);
+  # split into array elements rather than relying on unquoted expansion.
+  append_list() { local flag="$1" list="$2" items; [[ -n "$list" ]] || return 0; read -r -a items <<< "$list"; ARGS+=("$flag" "${items[@]}"); }
+  append_list --callback-urls "$CALLBACK_URLS"
+  append_list --logout-urls "$LOGOUT_URLS"
+  append_list --allowed-o-auth-flows "$OAUTH_FLOWS"
+  append_list --allowed-o-auth-scopes "$OAUTH_SCOPES"
+  append_list --supported-identity-providers "$IDPS"
   if [[ "$OAUTH_UPC" == "true" ]]; then
     ARGS+=(--allowed-o-auth-flows-user-pool-client)
   else
@@ -128,6 +152,20 @@ echo ""
 MCP_CONFIG="$HOME/.kiro/settings/mcp.json"
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
+# MCP_CONFIG is only ever handed to the Windows python that writes the file, so
+# convert it to native form (a no-op on Linux/macOS). Leaving it as an MSYS path
+# (/c/Users/...) makes python resolve it against its own root and write to the
+# wrong file.
+MCP_CONFIG="$(to_native_path "$MCP_CONFIG")"
+
+# SCRIPT_DIR is used two ways with conflicting needs, so keep it in MSYS form and
+# derive a separate native value only where a native tool consumes it:
+#   - native: passed to python to build the dist/index.js arg for `node` (below)
+#   - MSYS:   used in bash `[[ -f ]]` / `cp` for the skill copy further down —
+#             a `C:\...` path there would be mangled by bash backslash-escaping
+#             and the copy would silently fail on Windows.
+SCRIPT_DIR_NATIVE="$(to_native_path "$SCRIPT_DIR")"
+
 update_mcp_config() {
   local aws_profile="${PROFILE:-default}"
   if [[ -z "$PROFILE" ]]; then
@@ -145,10 +183,10 @@ update_mcp_config() {
       fi
     fi
   fi
-  python3 - "$MCP_CONFIG" "$API_URL" "$BUCKET_NAME" "$SCRIPT_DIR" "$REGION" "$aws_profile" "$COGNITO_DOMAIN" "$CLIENT_ID" "$USER_POOL_ID" <<'PYEOF'
+  python3 - "$MCP_CONFIG" "$API_URL" "$BUCKET_NAME" "$SCRIPT_DIR_NATIVE" "$REGION" "$aws_profile" "$COGNITO_DOMAIN" "$CLIENT_ID" "$USER_POOL_ID" "$ECS_CLUSTER_ARN" <<'PYEOF'
 import sys, json, os
 
-config_path, api_url, bucket, script_dir, region, aws_profile, cognito_domain, client_id, user_pool_id = sys.argv[1:]
+config_path, api_url, bucket, script_dir, region, aws_profile, cognito_domain, client_id, user_pool_id, ecs_cluster_arn = sys.argv[1:]
 dist_path = os.path.join(script_dir, "dist", "index.js")
 
 if os.path.exists(config_path):
@@ -157,20 +195,26 @@ if os.path.exists(config_path):
 else:
   config = {}
 
+env = {
+  "FLOCK_API_URL": api_url,
+  "FLOCK_S3_BUCKET": bucket,
+  "FLOCK_S3_REGION": region,
+  "FLOCK_COGNITO_DOMAIN": cognito_domain,
+  "FLOCK_COGNITO_CLIENT_ID": client_id,
+  "FLOCK_COGNITO_USER_POOL_ID": user_pool_id,
+  "AWS_PROFILE": aws_profile,
+  "AWS_DEFAULT_REGION": region,
+}
+if ecs_cluster_arn:
+  # ECS compute backend: stream_acp / list_acp_sessions reach Fargate
+  # agents via ECS Exec on this cluster.
+  env["FLOCK_ECS_CLUSTER_ARN"] = ecs_cluster_arn
+
 config.setdefault("mcpServers", {})
 config["mcpServers"]["kiro-flock-feed"] = {
   "command": "node",
   "args": [dist_path],
-  "env": {
-    "FLOCK_API_URL": api_url,
-    "FLOCK_S3_BUCKET": bucket,
-    "FLOCK_S3_REGION": region,
-    "FLOCK_COGNITO_DOMAIN": cognito_domain,
-    "FLOCK_COGNITO_CLIENT_ID": client_id,
-    "FLOCK_COGNITO_USER_POOL_ID": user_pool_id,
-    "AWS_PROFILE": aws_profile,
-    "AWS_DEFAULT_REGION": region,
-  },
+  "env": env,
 }
 
 os.makedirs(os.path.dirname(config_path), exist_ok=True)
@@ -189,38 +233,27 @@ else
   echo "Updated $MCP_CONFIG."
 fi
 
-# ── Install the kiro-flock skill ─────────────────────────────────────────────
+# ── Install the kiro-flock-compact skill ─────────────────────────────────────
 
-SKILL_SRC="$SCRIPT_DIR/skills/kiro-flock/SKILL.md"
-SKILL_DEST_DIR="$HOME/.kiro/skills/kiro-flock"
-SKILL_DEST="$SKILL_DEST_DIR/SKILL.md"
+# Remove deprecated skills replaced by kiro-flock-compact
+rm -rf "$HOME/.kiro/skills/kiro-flock" "$HOME/.kiro/skills/weltenbuilder" "$HOME/.kiro/skills/everforge"
 
-if [[ -f "$SKILL_SRC" ]]; then
-  mkdir -p "$SKILL_DEST_DIR"
-  cp "$SKILL_SRC" "$SKILL_DEST"
-  echo "Installed kiro-flock skill to $SKILL_DEST"
+COMPACT_SKILL_SRC="$SCRIPT_DIR/skills/kiro-flock-compact/SKILL.md"
+COMPACT_SKILL_DEST_DIR="$HOME/.kiro/skills/kiro-flock-compact"
+COMPACT_SKILL_DEST="$COMPACT_SKILL_DEST_DIR/SKILL.md"
+
+if [[ -f "$COMPACT_SKILL_SRC" ]]; then
+  mkdir -p "$COMPACT_SKILL_DEST_DIR"
+  cp "$COMPACT_SKILL_SRC" "$COMPACT_SKILL_DEST"
+  echo "Installed kiro-flock-compact skill to $COMPACT_SKILL_DEST"
 fi
 
-# ── Install the weltenbuilder skill ──────────────────────────────────────────
-
-WB_SKILL_SRC="$SCRIPT_DIR/skills/weltenbuilder/SKILL.md"
-WB_SKILL_DEST_DIR="$HOME/.kiro/skills/weltenbuilder"
-WB_SKILL_DEST="$WB_SKILL_DEST_DIR/SKILL.md"
-
-if [[ -f "$WB_SKILL_SRC" ]]; then
-  mkdir -p "$WB_SKILL_DEST_DIR"
-  cp "$WB_SKILL_SRC" "$WB_SKILL_DEST"
-  echo "Installed weltenbuilder skill to $WB_SKILL_DEST"
-fi
-
-# ── Update WAF IP allowlist (if deployed) ─────────────────────────────────────
-# The CDK stack does not deploy a WAF by default. If you add one manually or
-# via an extension stack and export a WafIpSetId output, this block updates it.
+# ── Update WAF IP allowlist ───────────────────────────────────────────────────
 
 WAF_ID=$(get_output "WafIpSetId")
 if [[ -n "$WAF_ID" ]]; then
   echo ""
-  echo "WAF IP set detected. Updating allowlist to your current public IP..."
+  echo "Updating WAF IP allowlist to your current public IP..."
   MY_IP=$(curl -sf https://checkip.amazonaws.com || echo "")
   if [[ -n "$MY_IP" ]]; then
     LOCK=$($AWS wafv2 get-ip-set --scope REGIONAL --region "$REGION" \
@@ -245,7 +278,6 @@ IDENTITY=$($AWS sts get-caller-identity --output json 2>&1) || true
 if echo "$IDENTITY" | grep -qi "error\|Exception"; then
   echo "Could not determine AWS identity — skipping S3 access check."
 else
-  ACCOUNT=$(echo "$IDENTITY" | python3 -c "import sys,json; print(json.load(sys.stdin)['Account'])")
   ARN=$(echo "$IDENTITY" | python3 -c "import sys,json; print(json.load(sys.stdin)['Arn'])")
   IDENTITY_TYPE=$(echo "$ARN" | python3 -c "import sys; a=sys.stdin.read().strip(); print('user' if ':user/' in a else 'role' if ':assumed-role/' in a else 'other')")
   IDENTITY_NAME=$(echo "$ARN" | python3 -c "import sys; a=sys.stdin.read().strip(); parts=a.split('/'); print(parts[1] if len(parts)>1 else a)")

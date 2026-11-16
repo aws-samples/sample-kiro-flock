@@ -1,0 +1,1195 @@
+Description: This stack includes resources needed to deploy AWS CDK apps into this environment
+Parameters:
+  TrustedAccounts:
+    Description: List of AWS accounts that are trusted to publish assets and deploy stacks to this environment
+    Default: ''
+    Type: CommaDelimitedList
+  TrustedAccountsForLookup:
+    Description: List of AWS accounts that are trusted to look up values in this environment
+    Default: ''
+    Type: CommaDelimitedList
+  CloudFormationExecutionPolicies:
+    Description: List of the ManagedPolicy ARN(s) to attach to the CloudFormation deployment role
+    Default: ''
+    Type: CommaDelimitedList
+  FileAssetsBucketName:
+    Description: The name of the S3 bucket used for file assets
+    Default: ''
+    Type: String
+  FileAssetsBucketKmsKeyId:
+    Description: 'Empty to create a new key (default), ''AWS_MANAGED_KEY'' to use a managed S3 key, or the ID/ARN of an existing key.'
+    Default: ''
+    Type: String
+  ContainerAssetsRepositoryName:
+    Description: A user-provided custom name to use for the container assets ECR repository
+    Default: ''
+    Type: String
+  Qualifier:
+    Description: An identifier to distinguish multiple bootstrap stacks in the same environment
+    Default: hnb659fds
+    Type: String
+    AllowedPattern: '[A-Za-z0-9_-]{1,10}'
+    ConstraintDescription: Qualifier must be an alphanumeric identifier of at most 10 characters
+  PublicAccessBlockConfiguration:
+    Description: Whether or not to enable S3 Staging Bucket Public Access Block Configuration
+    Default: 'true'
+    Type: String
+    AllowedValues:
+      - 'true'
+      - 'false'
+  InputPermissionsBoundary:
+    Description: Whether or not to use either the CDK supplied or custom permissions boundary
+    Default: ''
+    Type: String
+  UseExamplePermissionsBoundary:
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Type: String
+  ApplyPermissionsBoundaryToAllRoles:
+    Description: Whether to apply the permissions boundary to all bootstrap roles (not just the CloudFormation execution role)
+    Default: 'false'
+    Type: String
+    AllowedValues:
+      - 'true'
+      - 'false'
+  BootstrapVariant:
+    Type: String
+    Default: 'kiro-flock: agent deploy bootstrap'
+    Description: >-
+      Describe the provenance of the resources in this bootstrap stack. Change this when you customize the template. To prevent accidents, the CDK CLI will not overwrite bootstrap stacks with a
+      different variant.
+  DenyExternalId:
+    Type: String
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: Whether to deny AssumeRole calls with an ExternalId. This prevents calls that are intended to be deputized from accidentally assuming CDK Roles.
+  FlockBucketName:
+    Description: Name of the flock control-plane bucket (AgaStack). Deployed stacks and the roles they create are denied access to it.
+    Default: ''
+    Type: String
+  FlockUserPoolArn:
+    Description: ARN of the flock's Cognito user pool (AgaStack). Deployed stacks and the roles they create are denied access to it.
+    Default: ''
+    Type: String
+Conditions:
+  HasTrustedAccounts:
+    'Fn::Not':
+      - 'Fn::Equals':
+          - ''
+          - 'Fn::Join':
+              - ''
+              - Ref: TrustedAccounts
+  HasTrustedAccountsForLookup:
+    'Fn::Not':
+      - 'Fn::Equals':
+          - ''
+          - 'Fn::Join':
+              - ''
+              - Ref: TrustedAccountsForLookup
+  HasCloudFormationExecutionPolicies:
+    'Fn::Not':
+      - 'Fn::Equals':
+          - ''
+          - 'Fn::Join':
+              - ''
+              - Ref: CloudFormationExecutionPolicies
+  HasCustomFileAssetsBucketName:
+    'Fn::Not':
+      - 'Fn::Equals':
+          - ''
+          - Ref: FileAssetsBucketName
+  CreateNewKey:
+    'Fn::Equals':
+      - ''
+      - Ref: FileAssetsBucketKmsKeyId
+  UseAwsManagedKey:
+    'Fn::Equals':
+      - AWS_MANAGED_KEY
+      - Ref: FileAssetsBucketKmsKeyId
+  ShouldCreatePermissionsBoundary:
+    'Fn::Equals':
+      - 'true'
+      - Ref: UseExamplePermissionsBoundary
+  PermissionsBoundarySet:
+    'Fn::Not':
+      - 'Fn::Equals':
+          - ''
+          - Ref: InputPermissionsBoundary
+  ShouldApplyPermissionsBoundaryToAllRoles:
+    'Fn::And':
+      - Condition: PermissionsBoundarySet
+      - 'Fn::Equals':
+          - 'true'
+          - Ref: ApplyPermissionsBoundaryToAllRoles
+  HasCustomContainerAssetsRepositoryName:
+    'Fn::Not':
+      - 'Fn::Equals':
+          - ''
+          - Ref: ContainerAssetsRepositoryName
+  UsePublicAccessBlockConfiguration:
+    'Fn::Equals':
+      - 'true'
+      - Ref: PublicAccessBlockConfiguration
+  ShouldDenyExternalId:
+    'Fn::Equals':
+      - 'true'
+      - Ref: DenyExternalId
+  HasFlockBucketName:
+    'Fn::Not':
+      - 'Fn::Equals':
+          - Ref: FlockBucketName
+          - ''
+  HasFlockUserPoolArn:
+    'Fn::Not':
+      - 'Fn::Equals':
+          - Ref: FlockUserPoolArn
+          - ''
+Resources:
+  FileAssetsBucketEncryptionKey:
+    Type: 'AWS::KMS::Key'
+    Properties:
+      KeyPolicy:
+        Statement:
+          - Action:
+              - 'kms:Create*'
+              - 'kms:Describe*'
+              - 'kms:Enable*'
+              - 'kms:List*'
+              - 'kms:Put*'
+              - 'kms:Update*'
+              - 'kms:Revoke*'
+              - 'kms:Disable*'
+              - 'kms:Get*'
+              - 'kms:Delete*'
+              - 'kms:ScheduleKeyDeletion'
+              - 'kms:CancelKeyDeletion'
+              - 'kms:GenerateDataKey'
+              - 'kms:TagResource'
+              - 'kms:UntagResource'
+            Effect: Allow
+            Principal:
+              AWS:
+                Ref: 'AWS::AccountId'
+            Resource: '*'
+          - Action:
+              - 'kms:Decrypt'
+              - 'kms:DescribeKey'
+              - 'kms:Encrypt'
+              - 'kms:ReEncrypt*'
+              - 'kms:GenerateDataKey*'
+            Effect: Allow
+            Principal:
+              AWS: '*'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'kms:CallerAccount':
+                  Ref: 'AWS::AccountId'
+                'kms:ViaService':
+                  - 'Fn::Sub': 's3.${AWS::Region}.amazonaws.com'
+          - Action:
+              - 'kms:Decrypt'
+              - 'kms:DescribeKey'
+              - 'kms:Encrypt'
+              - 'kms:ReEncrypt*'
+              - 'kms:GenerateDataKey*'
+            Effect: Allow
+            Principal:
+              AWS:
+                'Fn::Sub': '${FilePublishingRole.Arn}'
+            Resource: '*'
+    Condition: CreateNewKey
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+  FileAssetsBucketEncryptionKeyAlias:
+    Condition: CreateNewKey
+    Type: 'AWS::KMS::Alias'
+    Properties:
+      AliasName:
+        'Fn::Sub': 'alias/cdk-${Qualifier}-assets-key'
+      TargetKeyId:
+        Ref: FileAssetsBucketEncryptionKey
+  StagingBucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketName:
+        'Fn::If':
+          - HasCustomFileAssetsBucketName
+          - 'Fn::Sub': '${FileAssetsBucketName}'
+          - 'Fn::Sub': 'cdk-${Qualifier}-assets-${AWS::AccountId}-${AWS::Region}'
+      AccessControl: Private
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: 'aws:kms'
+              KMSMasterKeyID:
+                'Fn::If':
+                  - CreateNewKey
+                  - 'Fn::Sub': '${FileAssetsBucketEncryptionKey.Arn}'
+                  - 'Fn::If':
+                      - UseAwsManagedKey
+                      - Ref: 'AWS::NoValue'
+                      - 'Fn::Sub': '${FileAssetsBucketKmsKeyId}'
+      PublicAccessBlockConfiguration:
+        'Fn::If':
+          - UsePublicAccessBlockConfiguration
+          - BlockPublicAcls: true
+            BlockPublicPolicy: true
+            IgnorePublicAcls: true
+            RestrictPublicBuckets: true
+          - Ref: 'AWS::NoValue'
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: CleanupOldVersions
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+          - Id: AbortIncompleteMultipartUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+    UpdateReplacePolicy: Retain
+    DeletionPolicy: Retain
+  StagingBucketPolicy:
+    Type: 'AWS::S3::BucketPolicy'
+    Properties:
+      Bucket:
+        Ref: StagingBucket
+      PolicyDocument:
+        Id: AccessControl
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowSSLRequestsOnly
+            Action: 's3:*'
+            Effect: Deny
+            Resource:
+              - 'Fn::Sub': '${StagingBucket.Arn}'
+              - 'Fn::Sub': '${StagingBucket.Arn}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': 'false'
+            Principal: '*'
+  ContainerAssetsRepository:
+    Type: 'AWS::ECR::Repository'
+    Properties:
+      ImageTagMutability: IMMUTABLE
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Untagged images should not exist, but expire any older than one year",
+                "selection": {
+                  "tagStatus": "untagged",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": 365
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+      RepositoryName:
+        'Fn::If':
+          - HasCustomContainerAssetsRepositoryName
+          - 'Fn::Sub': '${ContainerAssetsRepositoryName}'
+          - 'Fn::Sub': 'cdk-${Qualifier}-container-assets-${AWS::AccountId}-${AWS::Region}'
+      RepositoryPolicyText:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: LambdaECRImageRetrievalPolicy
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action:
+              - 'ecr:BatchGetImage'
+              - 'ecr:GetDownloadUrlForLayer'
+            Condition:
+              StringLike:
+                'aws:sourceArn':
+                  'Fn::Sub': 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:*'
+          - Sid: EmrServerlessImageRetrievalPolicy
+            Effect: Allow
+            Principal:
+              Service: emr-serverless.amazonaws.com
+            Action:
+              - 'ecr:BatchGetImage'
+              - 'ecr:GetDownloadUrlForLayer'
+              - 'ecr:DescribeImages'
+            Condition:
+              StringLike:
+                'aws:sourceArn':
+                  'Fn::Sub': 'arn:${AWS::Partition}:emr-serverless:${AWS::Region}:${AWS::AccountId}:/applications/*'
+      ImageScanningConfiguration:
+        ScanOnPush: true
+  FilePublishingRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: 'sts:AssumeRole'
+            Effect: Allow
+            Principal:
+              AWS:
+                Ref: 'AWS::AccountId'
+            Condition:
+              'Fn::If':
+                - ShouldDenyExternalId
+                - 'Null':
+                    'sts:ExternalId': 'true'
+                - Ref: 'AWS::NoValue'
+          - Action: 'sts:TagSession'
+            Effect: Allow
+            Principal:
+              AWS:
+                Ref: 'AWS::AccountId'
+          - 'Fn::If':
+              - HasTrustedAccounts
+              - Action:
+                  - 'sts:AssumeRole'
+                Effect: Allow
+                Principal:
+                  AWS:
+                    Ref: TrustedAccounts
+                Condition:
+                  'Fn::If':
+                    - ShouldDenyExternalId
+                    - 'Null':
+                        'sts:ExternalId': 'true'
+                    - Ref: 'AWS::NoValue'
+              - Ref: 'AWS::NoValue'
+          - 'Fn::If':
+              - HasTrustedAccounts
+              - Action:
+                  - 'sts:TagSession'
+                Effect: Allow
+                Principal:
+                  AWS:
+                    Ref: TrustedAccounts
+              - Ref: 'AWS::NoValue'
+      RoleName:
+        'Fn::Sub': 'cdk-${Qualifier}-file-publishing-role-${AWS::AccountId}-${AWS::Region}'
+      PermissionsBoundary:
+        'Fn::If':
+          - ShouldApplyPermissionsBoundaryToAllRoles
+          - 'Fn::Sub': 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${InputPermissionsBoundary}'
+          - Ref: 'AWS::NoValue'
+      Tags:
+        - Key: 'aws-cdk:bootstrap-role'
+          Value: file-publishing
+  ImagePublishingRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: 'sts:AssumeRole'
+            Effect: Allow
+            Principal:
+              AWS:
+                Ref: 'AWS::AccountId'
+            Condition:
+              'Fn::If':
+                - ShouldDenyExternalId
+                - 'Null':
+                    'sts:ExternalId': 'true'
+                - Ref: 'AWS::NoValue'
+          - Action: 'sts:TagSession'
+            Effect: Allow
+            Principal:
+              AWS:
+                Ref: 'AWS::AccountId'
+          - 'Fn::If':
+              - HasTrustedAccounts
+              - Action:
+                  - 'sts:AssumeRole'
+                Effect: Allow
+                Principal:
+                  AWS:
+                    Ref: TrustedAccounts
+                Condition:
+                  'Fn::If':
+                    - ShouldDenyExternalId
+                    - 'Null':
+                        'sts:ExternalId': 'true'
+                    - Ref: 'AWS::NoValue'
+              - Ref: 'AWS::NoValue'
+          - 'Fn::If':
+              - HasTrustedAccounts
+              - Action:
+                  - 'sts:TagSession'
+                Effect: Allow
+                Principal:
+                  AWS:
+                    Ref: TrustedAccounts
+              - Ref: 'AWS::NoValue'
+      RoleName:
+        'Fn::Sub': 'cdk-${Qualifier}-image-publishing-role-${AWS::AccountId}-${AWS::Region}'
+      PermissionsBoundary:
+        'Fn::If':
+          - ShouldApplyPermissionsBoundaryToAllRoles
+          - 'Fn::Sub': 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${InputPermissionsBoundary}'
+          - Ref: 'AWS::NoValue'
+      Tags:
+        - Key: 'aws-cdk:bootstrap-role'
+          Value: image-publishing
+  LookupRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: 'sts:AssumeRole'
+            Effect: Allow
+            Principal:
+              AWS:
+                Ref: 'AWS::AccountId'
+            Condition:
+              'Fn::If':
+                - ShouldDenyExternalId
+                - 'Null':
+                    'sts:ExternalId': 'true'
+                - Ref: 'AWS::NoValue'
+          - Action: 'sts:TagSession'
+            Effect: Allow
+            Principal:
+              AWS:
+                Ref: 'AWS::AccountId'
+          - 'Fn::If':
+              - HasTrustedAccountsForLookup
+              - Action:
+                  - 'sts:AssumeRole'
+                Effect: Allow
+                Principal:
+                  AWS:
+                    Ref: TrustedAccountsForLookup
+                Condition:
+                  'Fn::If':
+                    - ShouldDenyExternalId
+                    - 'Null':
+                        'sts:ExternalId': 'true'
+                    - Ref: 'AWS::NoValue'
+              - Ref: 'AWS::NoValue'
+          - 'Fn::If':
+              - HasTrustedAccountsForLookup
+              - Action:
+                  - 'sts:TagSession'
+                Effect: Allow
+                Principal:
+                  AWS:
+                    Ref: TrustedAccountsForLookup
+              - Ref: 'AWS::NoValue'
+          - 'Fn::If':
+              - HasTrustedAccounts
+              - Action:
+                  - 'sts:AssumeRole'
+                Effect: Allow
+                Principal:
+                  AWS:
+                    Ref: TrustedAccounts
+                Condition:
+                  'Fn::If':
+                    - ShouldDenyExternalId
+                    - 'Null':
+                        'sts:ExternalId': 'true'
+                    - Ref: 'AWS::NoValue'
+              - Ref: 'AWS::NoValue'
+          - 'Fn::If':
+              - HasTrustedAccounts
+              - Action:
+                  - 'sts:TagSession'
+                Effect: Allow
+                Principal:
+                  AWS:
+                    Ref: TrustedAccounts
+              - Ref: 'AWS::NoValue'
+      RoleName:
+        'Fn::Sub': 'cdk-${Qualifier}-lookup-role-${AWS::AccountId}-${AWS::Region}'
+      PermissionsBoundary:
+        'Fn::If':
+          - ShouldApplyPermissionsBoundaryToAllRoles
+          - 'Fn::Sub': 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${InputPermissionsBoundary}'
+          - Ref: 'AWS::NoValue'
+      ManagedPolicyArns:
+        - 'Fn::Sub': 'arn:${AWS::Partition}:iam::aws:policy/ReadOnlyAccess'
+      Policies:
+        - PolicyDocument:
+            Statement:
+              - Sid: DontReadSecrets
+                Effect: Deny
+                Action:
+                  - 'kms:Decrypt'
+                Resource: '*'
+            Version: '2012-10-17'
+          PolicyName: LookupRolePolicy
+      Tags:
+        - Key: 'aws-cdk:bootstrap-role'
+          Value: lookup
+  FilePublishingRoleDefaultPolicy:
+    Type: 'AWS::IAM::Policy'
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action:
+              - 's3:GetObject*'
+              - 's3:GetBucket*'
+              - 's3:GetEncryptionConfiguration'
+              - 's3:List*'
+              - 's3:DeleteObject*'
+              - 's3:PutObject*'
+              - 's3:Abort*'
+            Resource:
+              - 'Fn::Sub': '${StagingBucket.Arn}'
+              - 'Fn::Sub': '${StagingBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                'aws:ResourceAccount':
+                  - 'Fn::Sub': '${AWS::AccountId}'
+            Effect: Allow
+          - Action:
+              - 'kms:Decrypt'
+              - 'kms:DescribeKey'
+              - 'kms:Encrypt'
+              - 'kms:ReEncrypt*'
+              - 'kms:GenerateDataKey*'
+            Effect: Allow
+            Resource:
+              'Fn::If':
+                - CreateNewKey
+                - 'Fn::Sub': '${FileAssetsBucketEncryptionKey.Arn}'
+                - 'Fn::Sub': 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/${FileAssetsBucketKmsKeyId}'
+        Version: '2012-10-17'
+      Roles:
+        - Ref: FilePublishingRole
+      PolicyName:
+        'Fn::Sub': 'cdk-${Qualifier}-file-publishing-role-default-policy-${AWS::AccountId}-${AWS::Region}'
+  ImagePublishingRoleDefaultPolicy:
+    Type: 'AWS::IAM::Policy'
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action:
+              - 'ecr:PutImage'
+              - 'ecr:InitiateLayerUpload'
+              - 'ecr:UploadLayerPart'
+              - 'ecr:CompleteLayerUpload'
+              - 'ecr:BatchCheckLayerAvailability'
+              - 'ecr:DescribeRepositories'
+              - 'ecr:DescribeImages'
+              - 'ecr:BatchGetImage'
+              - 'ecr:GetDownloadUrlForLayer'
+            Resource:
+              'Fn::Sub': '${ContainerAssetsRepository.Arn}'
+            Effect: Allow
+          - Action:
+              - 'ecr:GetAuthorizationToken'
+            Resource: '*'
+            Effect: Allow
+        Version: '2012-10-17'
+      Roles:
+        - Ref: ImagePublishingRole
+      PolicyName:
+        'Fn::Sub': 'cdk-${Qualifier}-image-publishing-role-default-policy-${AWS::AccountId}-${AWS::Region}'
+  DeploymentActionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: 'sts:AssumeRole'
+            Effect: Allow
+            Principal:
+              AWS:
+                Ref: 'AWS::AccountId'
+            Condition:
+              'Fn::If':
+                - ShouldDenyExternalId
+                - 'Null':
+                    'sts:ExternalId': 'true'
+                - Ref: 'AWS::NoValue'
+          - Action: 'sts:TagSession'
+            Effect: Allow
+            Principal:
+              AWS:
+                Ref: 'AWS::AccountId'
+          - 'Fn::If':
+              - HasTrustedAccounts
+              - Action:
+                  - 'sts:AssumeRole'
+                Effect: Allow
+                Principal:
+                  AWS:
+                    Ref: TrustedAccounts
+                Condition:
+                  'Fn::If':
+                    - ShouldDenyExternalId
+                    - 'Null':
+                        'sts:ExternalId': 'true'
+                    - Ref: 'AWS::NoValue'
+              - Ref: 'AWS::NoValue'
+          - 'Fn::If':
+              - HasTrustedAccounts
+              - Action:
+                  - 'sts:TagSession'
+                Effect: Allow
+                Principal:
+                  AWS:
+                    Ref: TrustedAccounts
+              - Ref: 'AWS::NoValue'
+      Policies:
+        - PolicyDocument:
+            Statement:
+              - Sid: UpdateTaggedStacks
+                Effect: Allow
+                Action:
+                  - 'cloudformation:UpdateStack'
+                  - 'cloudformation:RollbackStack'
+                  - 'cloudformation:ContinueUpdateRollback'
+                  - 'cloudformation:DeleteStack'
+                  - 'cloudformation:UpdateTerminationProtection'
+                  - 'cloudformation:TagResource'
+                  - 'cloudformation:UntagResource'
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    'aws:ResourceTag/KiroFlockManaged': 'true'
+              - Sid: CreateTaggedStacks
+                Effect: Allow
+                Action:
+                  - 'cloudformation:CreateStack'
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    'aws:RequestTag/KiroFlockManaged': 'true'
+              - Sid: TagOnCreate
+                Effect: Allow
+                Action:
+                  - 'cloudformation:TagResource'
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    'cloudformation:CreateAction': CreateStack
+                    'aws:RequestTag/KiroFlockManaged': 'true'
+              - Sid: ProtectedStacks
+                Effect: Deny
+                NotAction:
+                  - 'cloudformation:Describe*'
+                  - 'cloudformation:Get*'
+                  - 'cloudformation:List*'
+                  - 'cloudformation:Detect*'
+                  - 'cloudformation:ValidateTemplate'
+                  - 'cloudformation:EstimateTemplateCost'
+                Resource:
+                  - 'Fn::Sub': 'arn:${AWS::Partition}:cloudformation:*:${AWS::AccountId}:stack/AgaStack*/*'
+                  - 'Fn::Sub': 'arn:${AWS::Partition}:cloudformation:*:${AWS::AccountId}:stack/CDKToolkit*/*'
+              - Sid: KeepDeployTag
+                Effect: Deny
+                Action:
+                  - 'cloudformation:UntagResource'
+                Resource: '*'
+                Condition:
+                  'ForAnyValue:StringEquals':
+                    'aws:TagKeys': KiroFlockManaged
+              - Sid: CallerIdentity
+                Effect: Allow
+                Action:
+                  - 'sts:GetCallerIdentity'
+                Resource: '*'
+              - Sid: PipelineCrossAccountArtifactsBucket
+                Effect: Allow
+                Action:
+                  - 's3:GetObject*'
+                  - 's3:GetBucket*'
+                  - 's3:List*'
+                  - 's3:Abort*'
+                  - 's3:DeleteObject*'
+                  - 's3:PutObject*'
+                Resource: '*'
+                Condition:
+                  StringNotEquals:
+                    's3:ResourceAccount':
+                      Ref: 'AWS::AccountId'
+              - Sid: PipelineCrossAccountArtifactsKey
+                Effect: Allow
+                Action:
+                  - 'kms:Decrypt'
+                  - 'kms:DescribeKey'
+                  - 'kms:Encrypt'
+                  - 'kms:ReEncrypt*'
+                  - 'kms:GenerateDataKey*'
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    'kms:ViaService':
+                      'Fn::Sub': 's3.${AWS::Region}.amazonaws.com'
+              - Action: 'iam:PassRole'
+                Resource:
+                  'Fn::Sub': '${CloudFormationExecutionRole.Arn}'
+                Effect: Allow
+              - Sid: CliStagingBucket
+                Effect: Allow
+                Action:
+                  - 's3:GetObject*'
+                  - 's3:GetBucket*'
+                  - 's3:List*'
+                Resource:
+                  - 'Fn::Sub': '${StagingBucket.Arn}'
+                  - 'Fn::Sub': '${StagingBucket.Arn}/*'
+              - Sid: ReadVersion
+                Effect: Allow
+                Action:
+                  - 'ssm:GetParameter'
+                  - 'ssm:GetParameters'
+                Resource:
+                  - 'Fn::Sub': 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${CdkBootstrapVersion}'
+            Version: '2012-10-17'
+          PolicyName: default
+      ManagedPolicyArns:
+        - 'Fn::Sub': 'arn:${AWS::Partition}:iam::aws:policy/AWSCloudFormationReadOnlyAccess'
+      RoleName:
+        'Fn::Sub': 'cdk-${Qualifier}-deploy-role-${AWS::AccountId}-${AWS::Region}'
+      PermissionsBoundary:
+        'Fn::If':
+          - ShouldApplyPermissionsBoundaryToAllRoles
+          - 'Fn::Sub': 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${InputPermissionsBoundary}'
+          - Ref: 'AWS::NoValue'
+      Tags:
+        - Key: 'aws-cdk:bootstrap-role'
+          Value: deploy
+  CloudFormationExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: 'sts:AssumeRole'
+            Effect: Allow
+            Principal:
+              Service: cloudformation.amazonaws.com
+        Version: '2012-10-17'
+      ManagedPolicyArns:
+        - Ref: AgentDeployPolicy
+      RoleName:
+        'Fn::Sub': 'cdk-${Qualifier}-cfn-exec-role-${AWS::AccountId}-${AWS::Region}'
+      PermissionsBoundary:
+        Ref: AgentPermissionsBoundary
+  CdkBootstrapVersion:
+    Type: 'AWS::SSM::Parameter'
+    Properties:
+      Type: String
+      Name:
+        'Fn::Sub': '/cdk-bootstrap/${Qualifier}/version'
+      Value: '33'
+  AgentDeployPolicy:
+    Type: 'AWS::IAM::ManagedPolicy'
+    Properties:
+      ManagedPolicyName:
+        'Fn::Sub': 'kiro-flock-${Qualifier}-agent-deploy'
+      Description: What CloudFormation may do on behalf of a kiro-flock deployer cluster. Replaces AdministratorAccess on the bootstrap execution role.
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: ApplicationServices
+            Effect: Allow
+            Action:
+              - 'acm:*'
+              - 'apigateway:*'
+              - 'appsync:*'
+              - 'application-autoscaling:*'
+              - 'autoscaling:*'
+              - 'bedrock:*'
+              - 'cloudformation:*'
+              - 'cloudfront:*'
+              - 'cloudwatch:*'
+              - 'codebuild:*'
+              - 'codecommit:*'
+              - 'codepipeline:*'
+              - 'cognito-idp:*'
+              - 'cognito-identity:*'
+              - 'dynamodb:*'
+              - 'ec2:*'
+              - 'ecr:*'
+              - 'ecs:*'
+              - 'elasticloadbalancing:*'
+              - 'events:*'
+              - 'firehose:*'
+              - 'kinesis:*'
+              - 'kms:*'
+              - 'lambda:*'
+              - 'logs:*'
+              - 'rds:*'
+              - 'route53:*'
+              - 's3:*'
+              - 'scheduler:*'
+              - 'secretsmanager:*'
+              - 'ses:*'
+              - 'sns:*'
+              - 'sqs:*'
+              - 'ssm:*'
+              - 'states:*'
+              - 'wafv2:*'
+              - 'xray:*'
+            Resource: '*'
+          - Sid: ApplicationRoles
+            Effect: Allow
+            Action:
+              - 'iam:CreateRole'
+              - 'iam:DeleteRole'
+              - 'iam:GetRole'
+              - 'iam:UpdateRole'
+              - 'iam:UpdateRoleDescription'
+              - 'iam:UpdateAssumeRolePolicy'
+              - 'iam:TagRole'
+              - 'iam:UntagRole'
+              - 'iam:ListRoleTags'
+              - 'iam:PutRolePolicy'
+              - 'iam:DeleteRolePolicy'
+              - 'iam:GetRolePolicy'
+              - 'iam:ListRolePolicies'
+              - 'iam:AttachRolePolicy'
+              - 'iam:DetachRolePolicy'
+              - 'iam:ListAttachedRolePolicies'
+              - 'iam:PutRolePermissionsBoundary'
+              - 'iam:CreatePolicy'
+              - 'iam:DeletePolicy'
+              - 'iam:GetPolicy'
+              - 'iam:GetPolicyVersion'
+              - 'iam:ListPolicyVersions'
+              - 'iam:CreatePolicyVersion'
+              - 'iam:DeletePolicyVersion'
+              - 'iam:TagPolicy'
+              - 'iam:UntagPolicy'
+              - 'iam:CreateServiceLinkedRole'
+              - 'iam:ListRoles'
+              - 'iam:ListPolicies'
+              - 'iam:CreateInstanceProfile'
+              - 'iam:DeleteInstanceProfile'
+              - 'iam:GetInstanceProfile'
+              - 'iam:AddRoleToInstanceProfile'
+              - 'iam:RemoveRoleFromInstanceProfile'
+              - 'iam:TagInstanceProfile'
+            Resource: '*'
+          - Sid: PassOwnRoles
+            Effect: Allow
+            Action:
+              - 'iam:PassRole'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'iam:ResourceTag/KiroFlockManaged': 'true'
+          - Sid: DenyFlockControlPlane
+            Effect: Deny
+            Action:
+              - 's3:*'
+            Resource:
+              'Fn::If':
+                - HasFlockBucketName
+                - - 'Fn::Sub': 'arn:${AWS::Partition}:s3:::${FlockBucketName}'
+                  - 'Fn::Sub': 'arn:${AWS::Partition}:s3:::${FlockBucketName}/*'
+                - - 'Fn::Sub': 'arn:${AWS::Partition}:s3:::kiro-flock-no-bucket-configured'
+          - Sid: DenyFlockUserPool
+            Effect: Deny
+            Action:
+              - 'cognito-idp:*'
+            Resource:
+              'Fn::If':
+                - HasFlockUserPoolArn
+                - - Ref: FlockUserPoolArn
+                - - 'Fn::Sub': 'arn:${AWS::Partition}:cognito-idp:*:${AWS::AccountId}:userpool/kiro-flock-no-pool-configured'
+          - Sid: DenyProtectedStacks
+            Effect: Deny
+            NotAction:
+              - 'cloudformation:Describe*'
+              - 'cloudformation:Get*'
+              - 'cloudformation:List*'
+              - 'cloudformation:Detect*'
+              - 'cloudformation:ValidateTemplate'
+              - 'cloudformation:EstimateTemplateCost'
+            Resource:
+              - 'Fn::Sub': 'arn:${AWS::Partition}:cloudformation:*:${AWS::AccountId}:stack/AgaStack*/*'
+              - 'Fn::Sub': 'arn:${AWS::Partition}:cloudformation:*:${AWS::AccountId}:stack/CDKToolkit*/*'
+          - Sid: DenyBootstrapAndFlockRoles
+            Effect: Deny
+            Action:
+              - 'sts:AssumeRole'
+              - 'iam:*'
+            Resource:
+              - 'Fn::Sub': 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/cdk-*'
+              - 'Fn::Sub': 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/AgaStack-*'
+          - Sid: DenyIdentityAndAccount
+            Effect: Deny
+            Action:
+              - 'iam:*User*'
+              - 'iam:*AccessKey*'
+              - 'iam:*Group*'
+              - 'iam:*LoginProfile*'
+              - 'iam:*MFADevice*'
+              - 'iam:*SAMLProvider*'
+              - 'iam:*OpenIDConnectProvider*'
+              - 'iam:*AccountAlias*'
+              - 'iam:*AccountPasswordPolicy*'
+              - 'organizations:*'
+              - 'account:*'
+              - 'billing:*'
+              - 'ce:*'
+              - 'cur:*'
+              - 'sso:*'
+              - 'sso-directory:*'
+              - 'controltower:*'
+              - 'trustedadvisor:*'
+              - 'support:*'
+            Resource: '*'
+          - Sid: DenyRoleChangesOutsideBoundary
+            Effect: Deny
+            Action:
+              - 'iam:CreateRole'
+              - 'iam:PutRolePermissionsBoundary'
+              - 'iam:PutRolePolicy'
+              - 'iam:AttachRolePolicy'
+              - 'iam:DetachRolePolicy'
+              - 'iam:DeleteRolePolicy'
+              - 'iam:UpdateAssumeRolePolicy'
+            Resource: '*'
+            Condition:
+              StringNotEquals:
+                'iam:PermissionsBoundary':
+                  'Fn::Sub': 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/kiro-flock-${Qualifier}-agent-boundary'
+          - Sid: DenyBoundaryRemoval
+            Effect: Deny
+            Action:
+              - 'iam:DeleteRolePermissionsBoundary'
+            Resource:
+              'Fn::Sub': 'arn:${AWS::Partition}:iam::*:role/*'
+            Condition:
+              StringEquals:
+                'iam:PermissionsBoundary':
+                  'Fn::Sub': 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/kiro-flock-${Qualifier}-agent-boundary'
+          - Sid: DenyBoundaryEdits
+            Effect: Deny
+            Action:
+              - 'iam:CreatePolicyVersion'
+              - 'iam:DeletePolicy'
+              - 'iam:DeletePolicyVersion'
+              - 'iam:SetDefaultPolicyVersion'
+            Resource:
+              'Fn::Sub': 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/kiro-flock-${Qualifier}-agent-boundary'
+          - Sid: DenyFlockFunctions
+            Effect: Deny
+            NotAction:
+              - 'lambda:Get*'
+              - 'lambda:List*'
+            Resource:
+              'Fn::Sub': 'arn:${AWS::Partition}:lambda:*:${AWS::AccountId}:function:AgaStack-*'
+          - Sid: DenyFlockParameters
+            Effect: Deny
+            Action:
+              - 'ssm:*Parameter*'
+            Resource:
+              'Fn::Sub': 'arn:${AWS::Partition}:ssm:*:${AWS::AccountId}:parameter/aga/*'
+          - Sid: DenyCommandsOnFlockNodes
+            Effect: Deny
+            Action:
+              - 'ssm:SendCommand'
+              - 'ssm:StartSession'
+            Resource:
+              'Fn::Sub': 'arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:instance/*'
+            Condition:
+              StringEquals:
+                'aws:ResourceTag/Project': kiro-flock
+          - Sid: DenyUntaggedStackChanges
+            Effect: Deny
+            Action:
+              - 'cloudformation:UpdateStack'
+              - 'cloudformation:DeleteStack'
+            Resource: '*'
+            Condition:
+              'Null':
+                'aws:ResourceTag/KiroFlockManaged': 'true'
+          - Sid: DenyUntaggingFlockStacks
+            Effect: Deny
+            Action:
+              - 'cloudformation:UntagResource'
+              - 'tag:UntagResources'
+            Resource: '*'
+            Condition:
+              'ForAnyValue:StringEquals':
+                'aws:TagKeys': KiroFlockManaged
+  AgentPermissionsBoundary:
+    Type: 'AWS::IAM::ManagedPolicy'
+    Properties:
+      ManagedPolicyName:
+        'Fn::Sub': 'kiro-flock-${Qualifier}-agent-boundary'
+      Description: Permissions boundary carried by the bootstrap execution role and by every role a kiro-flock deployer stack creates.
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: WithinBoundary
+            Effect: Allow
+            Action: '*'
+            Resource: '*'
+          - Sid: DenyFlockControlPlane
+            Effect: Deny
+            Action:
+              - 's3:*'
+            Resource:
+              'Fn::If':
+                - HasFlockBucketName
+                - - 'Fn::Sub': 'arn:${AWS::Partition}:s3:::${FlockBucketName}'
+                  - 'Fn::Sub': 'arn:${AWS::Partition}:s3:::${FlockBucketName}/*'
+                - - 'Fn::Sub': 'arn:${AWS::Partition}:s3:::kiro-flock-no-bucket-configured'
+          - Sid: DenyFlockUserPool
+            Effect: Deny
+            Action:
+              - 'cognito-idp:*'
+            Resource:
+              'Fn::If':
+                - HasFlockUserPoolArn
+                - - Ref: FlockUserPoolArn
+                - - 'Fn::Sub': 'arn:${AWS::Partition}:cognito-idp:*:${AWS::AccountId}:userpool/kiro-flock-no-pool-configured'
+          - Sid: DenyProtectedStacks
+            Effect: Deny
+            NotAction:
+              - 'cloudformation:Describe*'
+              - 'cloudformation:Get*'
+              - 'cloudformation:List*'
+              - 'cloudformation:Detect*'
+              - 'cloudformation:ValidateTemplate'
+              - 'cloudformation:EstimateTemplateCost'
+            Resource:
+              - 'Fn::Sub': 'arn:${AWS::Partition}:cloudformation:*:${AWS::AccountId}:stack/AgaStack*/*'
+              - 'Fn::Sub': 'arn:${AWS::Partition}:cloudformation:*:${AWS::AccountId}:stack/CDKToolkit*/*'
+          - Sid: DenyBootstrapAndFlockRoles
+            Effect: Deny
+            Action:
+              - 'sts:AssumeRole'
+              - 'iam:*'
+            Resource:
+              - 'Fn::Sub': 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/cdk-*'
+              - 'Fn::Sub': 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/AgaStack-*'
+          - Sid: DenyIdentityAndAccount
+            Effect: Deny
+            Action:
+              - 'iam:*User*'
+              - 'iam:*AccessKey*'
+              - 'iam:*Group*'
+              - 'iam:*LoginProfile*'
+              - 'iam:*MFADevice*'
+              - 'iam:*SAMLProvider*'
+              - 'iam:*OpenIDConnectProvider*'
+              - 'iam:*AccountAlias*'
+              - 'iam:*AccountPasswordPolicy*'
+              - 'organizations:*'
+              - 'account:*'
+              - 'billing:*'
+              - 'ce:*'
+              - 'cur:*'
+              - 'sso:*'
+              - 'sso-directory:*'
+              - 'controltower:*'
+              - 'trustedadvisor:*'
+              - 'support:*'
+            Resource: '*'
+          - Sid: DenyRoleChangesOutsideBoundary
+            Effect: Deny
+            Action:
+              - 'iam:CreateRole'
+              - 'iam:PutRolePermissionsBoundary'
+              - 'iam:PutRolePolicy'
+              - 'iam:AttachRolePolicy'
+              - 'iam:DetachRolePolicy'
+              - 'iam:DeleteRolePolicy'
+              - 'iam:UpdateAssumeRolePolicy'
+            Resource: '*'
+            Condition:
+              StringNotEquals:
+                'iam:PermissionsBoundary':
+                  'Fn::Sub': 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/kiro-flock-${Qualifier}-agent-boundary'
+          - Sid: DenyBoundaryRemoval
+            Effect: Deny
+            Action:
+              - 'iam:DeleteRolePermissionsBoundary'
+            Resource:
+              'Fn::Sub': 'arn:${AWS::Partition}:iam::*:role/*'
+            Condition:
+              StringEquals:
+                'iam:PermissionsBoundary':
+                  'Fn::Sub': 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/kiro-flock-${Qualifier}-agent-boundary'
+          - Sid: DenyBoundaryEdits
+            Effect: Deny
+            Action:
+              - 'iam:CreatePolicyVersion'
+              - 'iam:DeletePolicy'
+              - 'iam:DeletePolicyVersion'
+              - 'iam:SetDefaultPolicyVersion'
+            Resource:
+              'Fn::Sub': 'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/kiro-flock-${Qualifier}-agent-boundary'
+          - Sid: DenyFlockFunctions
+            Effect: Deny
+            NotAction:
+              - 'lambda:Get*'
+              - 'lambda:List*'
+            Resource:
+              'Fn::Sub': 'arn:${AWS::Partition}:lambda:*:${AWS::AccountId}:function:AgaStack-*'
+          - Sid: DenyFlockParameters
+            Effect: Deny
+            Action:
+              - 'ssm:*Parameter*'
+            Resource:
+              'Fn::Sub': 'arn:${AWS::Partition}:ssm:*:${AWS::AccountId}:parameter/aga/*'
+          - Sid: DenyCommandsOnFlockNodes
+            Effect: Deny
+            Action:
+              - 'ssm:SendCommand'
+              - 'ssm:StartSession'
+            Resource:
+              'Fn::Sub': 'arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:instance/*'
+            Condition:
+              StringEquals:
+                'aws:ResourceTag/Project': kiro-flock
+          - Sid: DenyUntaggedStackChanges
+            Effect: Deny
+            Action:
+              - 'cloudformation:UpdateStack'
+              - 'cloudformation:DeleteStack'
+            Resource: '*'
+            Condition:
+              'Null':
+                'aws:ResourceTag/KiroFlockManaged': 'true'
+          - Sid: DenyUntaggingFlockStacks
+            Effect: Deny
+            Action:
+              - 'cloudformation:UntagResource'
+              - 'tag:UntagResources'
+            Resource: '*'
+            Condition:
+              'ForAnyValue:StringEquals':
+                'aws:TagKeys': KiroFlockManaged
+Outputs:
+  BucketName:
+    Description: The name of the S3 bucket owned by the CDK toolkit stack
+    Value:
+      'Fn::Sub': '${StagingBucket}'
+  BucketDomainName:
+    Description: The domain name of the S3 bucket owned by the CDK toolkit stack
+    Value:
+      'Fn::Sub': '${StagingBucket.RegionalDomainName}'
+  FileAssetKeyArn:
+    Description: The ARN of the KMS key used to encrypt the asset bucket (deprecated)
+    Value:
+      'Fn::If':
+        - CreateNewKey
+        - 'Fn::Sub': '${FileAssetsBucketEncryptionKey.Arn}'
+        - 'Fn::Sub': '${FileAssetsBucketKmsKeyId}'
+    Export:
+      Name:
+        'Fn::Sub': 'CdkBootstrap-${Qualifier}-FileAssetKeyArn'
+  ImageRepositoryName:
+    Description: The name of the ECR repository which hosts docker image assets
+    Value:
+      'Fn::Sub': '${ContainerAssetsRepository}'
+  BootstrapVersion:
+    Description: The version of the bootstrap resources that are currently mastered in this stack
+    Value: '33'

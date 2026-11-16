@@ -1,0 +1,460 @@
+/* ============================================================================
+   Dashboard overlay — fleet overview + per-cluster run drill-down.
+
+   Full-screen fixed overlay above everything (including the topbar).
+   Visual language follows shell.css tokens (dark surfaces, mono accents).
+   ============================================================================ */
+
+.dash-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 900; /* below the confirm modal (950) and toast (1000) */
+  display: none;
+  flex-direction: column;
+  background: var(--bg);
+}
+.dash-overlay.visible { display: flex; }
+
+/* ---------- Header ------------------------------------------------------------ */
+
+.dash-header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  flex-shrink: 0;
+  min-height: 52px;
+}
+.dash-title {
+  font-family: var(--mono);
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--accent);
+  letter-spacing: -0.5px;
+  white-space: nowrap;
+}
+.dash-breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-muted);
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.dash-breadcrumb .dash-crumb-link {
+  color: var(--text-dim);
+  cursor: pointer;
+  text-decoration: none;
+}
+.dash-breadcrumb .dash-crumb-link:hover { color: var(--accent); text-decoration: underline; }
+.dash-breadcrumb .dash-crumb-sep { opacity: 0.5; }
+
+.dash-header-spacer { flex: 1; }
+
+.dash-freshness {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.dash-freshness.building { color: var(--yellow); animation: sh-pulse 1.5s ease-in-out infinite; }
+
+.dash-close {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.dash-close:hover { color: var(--text); border-color: var(--border-light); }
+
+/* ---------- Body -------------------------------------------------------------- */
+
+.dash-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 18px 20px 40px;
+  min-height: 0;
+}
+
+.dash-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 80px 0;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+/* ---------- Stat cards -------------------------------------------------------- */
+
+.dash-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px;
+  margin-bottom: 18px;
+}
+.dash-stat {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 12px 14px;
+  min-width: 0;
+}
+.dash-stat-value {
+  font-family: var(--mono);
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dash-stat-value.cost { color: var(--cost); }
+.dash-stat-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.7px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+/* ---------- Running strip ------------------------------------------------------ */
+
+.dash-running {
+  margin-bottom: 18px;
+}
+.dash-running-title,
+.dash-section-title {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+.dash-running-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.dash-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 5px 12px;
+  cursor: pointer;
+  font-size: 12px;
+  transition: border-color 0.15s;
+}
+.dash-chip:hover { border-color: var(--accent); }
+.dash-chip .dash-chip-name { font-family: var(--mono); font-weight: 600; color: var(--text); }
+.dash-chip .dash-chip-meta { color: var(--text-muted); font-size: 11px; }
+.dash-chip .cost-label { font-size: 11px; }
+.dash-chip-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.dash-chip-dot.running { background: var(--green); box-shadow: 0 0 6px var(--green); }
+.dash-chip-dot.starting { background: var(--accent); animation: sh-pulse 1.5s ease-in-out infinite; }
+.dash-chip-dot.paused { background: var(--yellow); }
+.dash-chip-dot.stopping { background: var(--red); animation: sh-pulse 1.5s ease-in-out infinite; }
+.dash-running-empty { color: var(--text-muted); font-size: 12px; }
+
+/* ---------- Chart grid ---------------------------------------------------------- */
+
+.dash-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+@media (max-width: 900px) {
+  .dash-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+.dash-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 12px 14px 14px;
+  min-width: 0;
+  position: relative;
+}
+.dash-card-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.7px;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+}
+.dash-card-body {
+  position: relative;
+  height: 220px;
+}
+.dash-card-body canvas { max-width: 100%; }
+.dash-card-body.tall { height: 260px; }
+.dash-card-body.short { height: 90px; }
+
+.dash-empty {
+  position: absolute;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  font-size: 12px;
+  background: var(--surface);
+}
+.dash-card.is-empty .dash-empty { display: flex; }
+
+/* ---------- Drill-down header controls ------------------------------------------ */
+
+.dash-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.dash-cluster-name {
+  font-family: var(--mono);
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text);
+}
+.dash-run-select {
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-family: var(--mono);
+  font-size: 12px;
+  padding: 5px 8px;
+  max-width: 280px;
+}
+.dash-run-select:focus { outline: none; border-color: var(--accent); }
+
+/* Segmented bucket-size control */
+.dash-seg {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.dash-seg button {
+  background: var(--surface-2);
+  border: none;
+  border-right: 1px solid var(--border);
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 5px 12px;
+  cursor: pointer;
+}
+.dash-seg button:last-child { border-right: none; }
+.dash-seg button:hover { color: var(--text); }
+.dash-seg button.active { background: var(--accent-dim); color: var(--accent); }
+
+/* Tabs */
+.dash-tabs {
+  display: inline-flex;
+  gap: 2px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 14px;
+  width: 100%;
+}
+.dash-tabs button {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.7px;
+  padding: 7px 14px;
+  cursor: pointer;
+}
+.dash-tabs button:hover { color: var(--text); }
+.dash-tabs button.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+.dash-live-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 10px;
+  border-radius: 20px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.dash-live-pill.live { background: var(--green-dim); color: var(--green); }
+.dash-live-pill.archived { background: var(--surface-2); color: var(--text-muted); }
+
+/* ---------- Lifecycle band -------------------------------------------------------- */
+
+.dash-band {
+  position: relative;
+  height: 34px;
+  background: var(--surface-2);
+  border-radius: var(--radius);
+  overflow: hidden;
+  margin-top: 24px;
+}
+.dash-band-span {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+}
+.dash-band-span.state-starting { background: rgba(250, 204, 21, 0.45); }
+.dash-band-span.state-active   { background: rgba(52, 211, 153, 0.45); }
+.dash-band-span.state-quiet    { background: rgba(96, 165, 250, 0.45); }
+.dash-band-span.state-idlemost { background: rgba(160, 160, 184, 0.35); }
+.dash-band-span.state-none     { background: rgba(255, 255, 255, 0.04); }
+.dash-band-marker {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--accent);
+  box-shadow: 0 0 4px var(--accent);
+}
+.dash-band-axis {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: 5px;
+}
+.dash-band-legend {
+  display: flex;
+  gap: 14px;
+  margin-top: 8px;
+  font-size: 10px;
+  color: var(--text-muted);
+}
+.dash-band-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.dash-band-legend i {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  display: inline-block;
+}
+.dash-band-legend .lg-starting { background: rgba(250, 204, 21, 0.45); }
+.dash-band-legend .lg-active   { background: rgba(52, 211, 153, 0.45); }
+.dash-band-legend .lg-quiet    { background: rgba(96, 165, 250, 0.45); }
+.dash-band-legend .lg-idlemost { background: rgba(160, 160, 184, 0.35); }
+.dash-band-legend .lg-none     { background: rgba(255, 255, 255, 0.08); }
+.dash-band-legend .lg-marker   { background: var(--accent); width: 2px; }
+
+/* ---------- Heatmap ------------------------------------------------------------------ */
+
+.dash-heatmap-wrap {
+  overflow-x: auto;
+  height: 100%;
+}
+.dash-heatmap-wrap canvas { display: block; }
+
+/* ---------- Clusters & runs table ----------------------------------------------- */
+
+.dash-clusters { margin-bottom: 18px; }
+.dash-clusters-table {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  /* Header + ~6 rows; the rest scrolls. */
+  max-height: 250px;
+  overflow-y: auto;
+}
+.dash-cluster-row.head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+.dash-cluster-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 1.4fr) 90px 60px minmax(120px, 1fr) 90px 24px;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  background: var(--surface);
+  border: none;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  width: 100%;
+}
+.dash-cluster-row:last-child { border-bottom: none; }
+.dash-cluster-row:not(.head):not(:disabled):hover { background: var(--surface-2); }
+.dash-cluster-row:disabled { cursor: default; opacity: 0.6; }
+.dash-cluster-row.head {
+  cursor: default;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.7px;
+  color: var(--text-muted);
+  background: var(--surface-2);
+}
+.dash-cluster-row-name { font-family: var(--mono); font-weight: 600; }
+.dash-cluster-row-dim { color: var(--text-muted); font-family: var(--mono); font-size: 11px; }
+.dash-cluster-row-state {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.dash-cluster-row-state.running  { color: var(--green); }
+.dash-cluster-row-state.starting { color: var(--accent); }
+.dash-cluster-row-state.paused   { color: var(--yellow); }
+.dash-cluster-row-state.stopping { color: var(--red); }
+.dash-cluster-row-state.stopped  { color: var(--text-muted); }
+.dash-cluster-row-arrow { color: var(--text-muted); font-size: 14px; text-align: right; }
+
+/* ---------- Back button ----------------------------------------------------------- */
+
+.dash-back {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-muted);
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 12px;
+  padding: 5px 12px;
+  white-space: nowrap;
+}
+.dash-back:hover { color: var(--text); border-color: var(--border-light); }
+
+/* ---------- Card explainer line ---------------------------------------------------- */
+
+.dash-card-sub {
+  font-size: 10px;
+  color: var(--text-muted);
+  opacity: 0.8;
+  margin: -6px 0 10px;
+  line-height: 1.4;
+}

@@ -1,0 +1,41 @@
+# Line endings.
+#
+# Windows git defaults to core.autocrlf=true, which rewrites LF to CRLF on
+# checkout. For anything executed by a shell that is not cosmetic — bash
+# refuses a CRLF script outright:
+#
+#     $'\r': command not found
+#     setup.sh: line 2: syntax error near unexpected token
+#
+# so setup.sh, install.sh, shutdown.sh and get-mcp-env.sh would all break on a
+# default Windows clone before doing anything. Pinning eol=lf here fixes it at
+# the source, for every contributor, regardless of their local git config.
+#
+# The Dockerfile and the container entrypoint are in the same boat: they are
+# interpreted inside a Linux image, where a stray CR becomes part of the
+# command. Dockerfile.agent also strips CR from entrypoint.sh at build time as
+# belt-and-braces, which still matters when an image is built from a working
+# tree that was already checked out with CRLF.
+*.sh            text eol=lf
+Dockerfile*     text eol=lf
+entrypoint.sh   text eol=lf
+
+# Same reasoning for files read by Linux-side tooling at runtime.
+*.json          text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+
+# Let git decide for ordinary source; these are never executed directly.
+*.ts            text
+*.js            text
+*.css           text
+*.html          text
+*.md            text
+
+# Binary assets must never be touched.
+*.png           binary
+*.jpg           binary
+*.gif           binary
+*.mp4           binary
+*.zip           binary
+*.ico           binary

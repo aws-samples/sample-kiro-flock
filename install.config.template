@@ -4,3 +4,4 @@
 
 REGION="eu-central-1"
 PROFILE="your-aws-profile-name"
+USERNAME="your-cognito-username"

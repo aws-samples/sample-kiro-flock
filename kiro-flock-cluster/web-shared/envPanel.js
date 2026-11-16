@@ -25,7 +25,8 @@
     if (n == null) return "";
     if (n < 1024) return n + "B";
     if (n < 1024 * 1024) return (n / 1024).toFixed(1) + "K";
-    return (n / (1024 * 1024)).toFixed(1) + "M";
+    if (n < 1024 * 1024 * 1024) return (n / (1024 * 1024)).toFixed(1) + "M";
+    return (n / (1024 * 1024 * 1024)).toFixed(1) + "G";
   };
 
   const fmtTime = (ts) => {
@@ -34,34 +35,72 @@
     return isNaN(d.getTime()) ? "" : d.toLocaleTimeString();
   };
 
+  // Date + time for folder aggregates: time-only is ambiguous once a
+  // folder's newest write is from a previous day.
+  const fmtWhen = (ts) => {
+    if (!ts) return "";
+    const d = new Date(ts);
+    if (isNaN(d.getTime())) return "";
+    const now = new Date();
+    const sameDay = d.getFullYear() === now.getFullYear()
+      && d.getMonth() === now.getMonth()
+      && d.getDate() === now.getDate();
+    if (sameDay) return d.toLocaleTimeString();
+    return d.toLocaleDateString(undefined, { month: "short", day: "numeric" })
+      + " " + d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  };
+
   // Minimal markdown renderer. Uses the `marked` library if available
   // (loaded via CDN in the host page), falls back to a basic hand-rolled
   // parser for headings, bold, code blocks, and lists.
   function renderMarkdown(text) {
-    if (typeof marked !== "undefined" && marked.parse) {
-      return marked.parse(text);
+    // Strip YAML frontmatter (--- delimited) and render it as a compact
+    // metadata table above the content.
+    let frontmatterHtml = "";
+    let content = text;
+    const fmMatch = text.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
+    if (fmMatch) {
+      const fmLines = fmMatch[1].split("\n").filter(l => l.trim());
+      if (fmLines.length > 0) {
+        const rows = fmLines.map(line => {
+          const idx = line.indexOf(":");
+          if (idx === -1) return "";
+          const key = line.slice(0, idx).trim();
+          const val = line.slice(idx + 1).trim().replace(/^["']|["']$/g, "");
+          return `<tr><td style="padding:2px 8px 2px 0;color:var(--text-dim);font-size:11px">${esc(key)}</td><td style="padding:2px 0;font-size:11px">${esc(val)}</td></tr>`;
+        }).join("");
+        frontmatterHtml = `<table style="margin-bottom:12px;border-collapse:collapse;opacity:0.8">${rows}</table>`;
+      }
+      content = fmMatch[2];
     }
-    // Fallback: basic parsing without table support.
-    let html = text
-      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-    html = html.replace(/```[\w]*\n?([\s\S]*?)```/g, (_, code) =>
-      `<pre><code>${code.trim()}</code></pre>`);
-    html = html.replace(/`([^`]+)`/g, "<code>$1</code>");
-    html = html.replace(/^### (.+)$/gm, "<h3>$1</h3>");
-    html = html.replace(/^## (.+)$/gm, "<h2>$1</h2>");
-    html = html.replace(/^# (.+)$/gm, "<h1>$1</h1>");
-    html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
-    html = html.replace(/^---+$/gm, "<hr>");
-    html = html.replace(/^&gt; (.+)$/gm, "<blockquote>$1</blockquote>");
-    html = html.replace(/^[-*] (.+)$/gm, "<li>$1</li>");
-    html = html.replace(/(<li>.*<\/li>\n?)+/g, (m) => `<ul>${m}</ul>`);
-    html = html.replace(/^\d+\. (.+)$/gm, "<li>$1</li>");
-    html = html.split("\n").map((line) => {
-      if (!line.trim()) return "";
-      if (/^<(h[1-3]|ul|ol|li|pre|blockquote|hr)/.test(line)) return line;
-      return `<p>${line}</p>`;
-    }).join("\n");
-    return html;
+
+    let bodyHtml;
+    if (typeof marked !== "undefined" && marked.parse) {
+      bodyHtml = marked.parse(content);
+    } else {
+      // Fallback: basic parsing without table support.
+      let html = content
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      html = html.replace(/```[\w]*\n?([\s\S]*?)```/g, (_, code) =>
+        `<pre><code>${code.trim()}</code></pre>`);
+      html = html.replace(/`([^`]+)`/g, "<code>$1</code>");
+      html = html.replace(/^### (.+)$/gm, "<h3>$1</h3>");
+      html = html.replace(/^## (.+)$/gm, "<h2>$1</h2>");
+      html = html.replace(/^# (.+)$/gm, "<h1>$1</h1>");
+      html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+      html = html.replace(/^---+$/gm, "<hr>");
+      html = html.replace(/^&gt; (.+)$/gm, "<blockquote>$1</blockquote>");
+      html = html.replace(/^[-*] (.+)$/gm, "<li>$1</li>");
+      html = html.replace(/(<li>.*<\/li>\n?)+/g, (m) => `<ul>${m}</ul>`);
+      html = html.replace(/^\d+\. (.+)$/gm, "<li>$1</li>");
+      html = html.split("\n").map((line) => {
+        if (!line.trim()) return "";
+        if (/^<(h[1-3]|ul|ol|li|pre|blockquote|hr)/.test(line)) return line;
+        return `<p>${line}</p>`;
+      }).join("\n");
+      bodyHtml = html;
+    }
+    return frontmatterHtml + bodyHtml;
   }
 
   // Extension → highlight.js language map for source files. If a file
@@ -146,10 +185,45 @@
     return root;
   }
 
-  function sortChildren(node) {
+  // Recursively compute folder aggregates: totalSize is the sum of all
+  // descendant file sizes, lastModified the max descendant timestamp.
+  // Single O(files) pass over the freshly built tree, so it's cheap to
+  // run on every poll.
+  function computeAggregates(node) {
+    if (node.type === "file") {
+      const t = node.lastModified ? new Date(node.lastModified).getTime() : 0;
+      node.mtime = isNaN(t) ? 0 : t;
+      node.totalSize = node.size || 0;
+      return node;
+    }
+    let total = 0;
+    let newest = 0;
+    let newestIso = null;
+    for (const child of node.children.values()) {
+      computeAggregates(child);
+      total += child.totalSize || 0;
+      if ((child.mtime || 0) > newest) {
+        newest = child.mtime;
+        newestIso = child.lastModified;
+      }
+    }
+    node.totalSize = total;
+    node.mtime = newest;
+    node.lastModified = newestIso;
+    return node;
+  }
+
+  function sortChildren(node, mode) {
     const entries = Array.from(node.children.values());
     entries.sort((a, b) => {
       if (a.type !== b.type) return a.type === "folder" ? -1 : 1;
+      if (mode === "modified") {
+        const d = (b.mtime || 0) - (a.mtime || 0);
+        if (d !== 0) return d;
+      } else if (mode === "size") {
+        const d = (b.totalSize || 0) - (a.totalSize || 0);
+        if (d !== 0) return d;
+      }
       return a.name.localeCompare(b.name);
     });
     return entries;
@@ -172,8 +246,15 @@
         <div class="env-panel-header">
           <span class="env-panel-title">environment</span>
           <div class="env-panel-actions">
-            <button class="env-btn env-btn--danger" data-env-action="clean" title="Archive this cluster's environment and store to history/">clean</button>
+            <select class="env-sort" data-env-sort title="Sort files and folders">
+              <option value="name">name</option>
+              <option value="modified">modified</option>
+              <option value="size">size</option>
+            </select>
+            <button class="env-btn env-btn--danger" data-env-action="clean" title="Archive all environment folders and stores to history/">archive all</button>
+            <button class="env-btn env-btn--danger" data-env-action="delete-all" title="Permanently delete the entire environment (no history copy)">delete all</button>
             <button class="env-btn" data-env-action="dl-all" style="display:none" title="Download all files as a zip">&#8595; all</button>
+            <button class="env-btn" data-env-action="html-mode" style="display:none" title="Toggle between HTML source and rendered preview"></button>
             <button class="env-btn" data-env-action="refresh-file" style="display:none" title="Reload the current file">&#8635;</button>
             <button class="env-btn" data-env-action="dl-file" style="display:none" title="Download this file">&#8595; download</button>
             <button class="env-btn" data-env-action="back" style="display:none" title="Back to file list">&#8592; back</button>
@@ -188,19 +269,42 @@
     const viewerEl = container.querySelector("[data-env-viewer]");
     const dlAllBtn = container.querySelector('[data-env-action="dl-all"]');
     const refreshBtn = container.querySelector('[data-env-action="refresh-file"]');
+    const htmlModeBtn = container.querySelector('[data-env-action="html-mode"]');
     const dlFileBtn = container.querySelector('[data-env-action="dl-file"]');
     const backBtn = container.querySelector('[data-env-action="back"]');
     const cleanBtn = container.querySelector('[data-env-action="clean"]');
+    const deleteAllBtn = container.querySelector('[data-env-action="delete-all"]');
+    const sortSelect = container.querySelector("[data-env-sort]");
 
     // Local state.
+    const SORT_KEY = "envPanelSort";
+    let sortMode = "name";
+    try {
+      const saved = localStorage.getItem(SORT_KEY);
+      if (saved === "modified" || saved === "size") sortMode = saved;
+    } catch { /* private mode */ }
+    sortSelect.value = sortMode;
+    sortSelect.addEventListener("change", () => {
+      sortMode = sortSelect.value;
+      try { localStorage.setItem(SORT_KEY, sortMode); } catch { /* ignore */ }
+      renderList();
+    });
+
     let files = [];
     let kbFileCount = 0;
     let archivedRuns = 0;
     let activeKey = null;
+    // HTML preview: "source" shows highlighted markup, "rendered" shows a
+    // sandboxed iframe. Sticky across files within the session.
+    let htmlMode = "source";
+    let openFileContent = null; // raw content of the currently open file
     const openFolders = new Set();
     let initialOpenApplied = false;
     let pollTimer = null;
     let cleanHandler = options.onCleanRequested || null;
+    let folderCleanHandler = options.onFolderCleanRequested || null;
+    let deleteAllHandler = options.onDeleteAllRequested || null;
+    let folderDeleteHandler = options.onFolderDeleteRequested || null;
 
     // Auth-aware fetch: the host page already wraps window.fetch to
     // attach the bearer token and to suffix cluster URLs. We just call
@@ -262,6 +366,7 @@
       dlAllBtn.style.display = "";
 
       const root = buildTree(files);
+      computeAggregates(root);
       const envNode = root.children.get("environment");
       if (!envNode) {
         bodyEl.innerHTML = header + '<div class="env-empty">No environment files yet.</div>';
@@ -270,7 +375,7 @@
       }
 
       let tree = `<ul class="env-tree">`;
-      for (const child of sortChildren(envNode)) {
+      for (const child of sortChildren(envNode, sortMode)) {
         tree += renderNode(child, 0, true);
       }
       tree += `</ul>`;
@@ -298,6 +403,24 @@
           downloadFile(el.dataset.dlKey, el.dataset.dlName);
         });
       });
+      bodyEl.querySelectorAll(".env-clean-folder").forEach((el) => {
+        el.addEventListener("click", (e) => {
+          e.stopPropagation();
+          const folder = el.dataset.cleanFolder;
+          if (folder && typeof folderCleanHandler === "function") {
+            folderCleanHandler(folder);
+          }
+        });
+      });
+      bodyEl.querySelectorAll(".env-delete-folder").forEach((el) => {
+        el.addEventListener("click", (e) => {
+          e.stopPropagation();
+          const folder = el.dataset.deleteFolder;
+          if (folder && typeof folderDeleteHandler === "function") {
+            folderDeleteHandler(folder);
+          }
+        });
+      });
     }
 
     function renderNode(node, depth, isEnvRoot) {
@@ -323,14 +446,30 @@
       const indent = depth * 16;
       const classes = ["env-row", "env-row--folder"];
       if (isEnvRoot && depth > 0) classes.push("env-row--cluster");
+      // Per-folder clean button: shown on top-level folders under environment/
+      // (depth === 0 means direct child of the environment/ root). Includes
+      // cluster folders, deployment group folders, and the deployed/ folder.
+      const showFolderClean = isEnvRoot && depth === 0;
+      const folderCleanBtn = showFolderClean
+        ? `<button class="env-clean-folder" data-clean-folder="${esc(node.path)}" title="Archive this folder to history/">&#x23CF;</button>`
+        : "";
+      const folderDeleteBtn = showFolderClean
+        ? `<button class="env-delete-folder" data-delete-folder="${esc(node.path)}" title="Permanently delete this folder (no history copy)">&#x2715;</button>`
+        : "";
+      // Folder aggregates: total size of descendants + newest write.
+      const folderMeta = [fmtBytes(node.totalSize), fmtWhen(node.lastModified)]
+        .filter(Boolean).join(" \u00b7 ");
       let html = `<li>
         <div class="${classes.join(" ")}" data-folder="${esc(node.path)}" style="padding-left:${indent + 4}px">
           <span class="env-toggle">${toggle}</span>
           <span class="env-label">${esc(node.name)}/</span>
+          <span class="env-meta">${esc(folderMeta)}</span>
+          ${folderCleanBtn}
+          ${folderDeleteBtn}
         </div>`;
       if (isOpen && node.children.size > 0) {
         html += `<ul>`;
-        for (const child of sortChildren(node)) {
+        for (const child of sortChildren(node, sortMode)) {
           html += renderNode(child, depth + 1, isEnvRoot);
         }
         html += `</ul>`;
@@ -351,39 +490,71 @@
       dlFileBtn.style.display = "";
       backBtn.style.display = "";
       dlAllBtn.style.display = "none";
+      sortSelect.style.display = "none";
       try {
         const data = await apiGet(`${apiBase}/habitat/file?key=${encodeURIComponent(key)}`);
-        const content = data.content || "";
-        const isMarkdown = key.endsWith(".md") || key.endsWith(".markdown");
-        const filename = key.split("/").pop();
-        const sourceLang = getSourceLang(filename);
-        if (isMarkdown) {
-          viewerEl.innerHTML = `<div class="env-viewer-md">${renderMarkdown(content)}</div>`;
-        } else if (sourceLang && typeof hljs !== "undefined") {
-          try {
-            const highlighted = hljs.highlight(content, { language: sourceLang, ignoreIllegals: true });
-            viewerEl.innerHTML = `<pre class="env-viewer-code"><code class="hljs">${highlighted.value}</code></pre>`;
-          } catch {
-            // Language not registered in the hljs bundle, fall back to plain text.
-            viewerEl.innerHTML = `<pre>${esc(content)}</pre>`;
-          }
-        } else {
-          viewerEl.innerHTML = `<pre>${esc(content)}</pre>`;
-        }
+        openFileContent = data.content || "";
+        const isHtml = isHtmlFile(key);
+        htmlModeBtn.style.display = isHtml ? "" : "none";
+        if (isHtml) updateHtmlModeBtn();
+        renderFileContent(key, openFileContent);
       } catch (err) {
         viewerEl.innerHTML = `<pre>Failed to load file: ${esc(err.message || err)}</pre>`;
       }
     }
 
+    function isHtmlFile(key) {
+      const lower = key.toLowerCase();
+      return lower.endsWith(".html") || lower.endsWith(".htm");
+    }
+
+    function updateHtmlModeBtn() {
+      htmlModeBtn.innerHTML = htmlMode === "source" ? "&#9655; rendered" : "&lt;/&gt; source";
+    }
+
+    function renderFileContent(key, content) {
+      if (isHtmlFile(key) && htmlMode === "rendered") {
+        // Sandboxed preview: no scripts, no same-origin access. Agent
+        // output is untrusted, so the iframe renders markup and CSS only
+        // and gets a null origin (no access to the dashboard's token).
+        const frame = document.createElement("iframe");
+        frame.className = "env-viewer-html";
+        frame.setAttribute("sandbox", "");
+        frame.srcdoc = content;
+        viewerEl.innerHTML = "";
+        viewerEl.appendChild(frame);
+        return;
+      }
+      const isMarkdown = key.endsWith(".md") || key.endsWith(".markdown");
+      const filename = key.split("/").pop();
+      const sourceLang = getSourceLang(filename);
+      if (isMarkdown) {
+        viewerEl.innerHTML = `<div class="env-viewer-md">${renderMarkdown(content)}</div>`;
+      } else if (sourceLang && typeof hljs !== "undefined") {
+        try {
+          const highlighted = hljs.highlight(content, { language: sourceLang, ignoreIllegals: true });
+          viewerEl.innerHTML = `<pre class="env-viewer-code"><code class="hljs">${highlighted.value}</code></pre>`;
+        } catch {
+          // Language not registered in the hljs bundle, fall back to plain text.
+          viewerEl.innerHTML = `<pre>${esc(content)}</pre>`;
+        }
+      } else {
+        viewerEl.innerHTML = `<pre>${esc(content)}</pre>`;
+      }
+    }
+
     function closeFile() {
       activeKey = null;
+      openFileContent = null;
       viewerEl.style.display = "none";
       viewerEl.innerHTML = "";
       bodyEl.style.display = "";
       refreshBtn.style.display = "none";
+      htmlModeBtn.style.display = "none";
       dlFileBtn.style.display = "none";
       backBtn.style.display = "none";
       dlAllBtn.style.display = files.length > 0 ? "" : "none";
+      sortSelect.style.display = "";
       renderList();
     }
 
@@ -512,6 +683,11 @@
     // ---- Header button wiring --------------------------------------------
 
     refreshBtn.addEventListener("click", () => { if (activeKey) openFile(activeKey); });
+    htmlModeBtn.addEventListener("click", () => {
+      htmlMode = htmlMode === "source" ? "rendered" : "source";
+      updateHtmlModeBtn();
+      if (activeKey && openFileContent !== null) renderFileContent(activeKey, openFileContent);
+    });
     dlFileBtn.addEventListener("click", () => {
       if (!activeKey) return;
       downloadFile(activeKey, activeKey.replace("environment/", ""));
@@ -521,6 +697,9 @@
     cleanBtn.addEventListener("click", () => {
       if (typeof cleanHandler === "function") cleanHandler();
     });
+    deleteAllBtn.addEventListener("click", () => {
+      if (typeof deleteAllHandler === "function") deleteAllHandler();
+    });
 
     // ---- Public API ------------------------------------------------------
 
@@ -529,7 +708,13 @@
     return {
       refresh: loadHabitat,
       setCleanHandler(fn) { cleanHandler = fn; },
-      setCleanVisible(visible) { cleanBtn.style.display = visible ? "" : "none"; },
+      setFolderCleanHandler(fn) { folderCleanHandler = fn; },
+      setDeleteAllHandler(fn) { deleteAllHandler = fn; },
+      setFolderDeleteHandler(fn) { folderDeleteHandler = fn; },
+      setCleanVisible(visible) {
+        cleanBtn.style.display = visible ? "" : "none";
+        deleteAllBtn.style.display = visible ? "" : "none";
+      },
     };
   }
 

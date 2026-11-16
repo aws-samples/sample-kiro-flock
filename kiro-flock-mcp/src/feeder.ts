@@ -80,18 +80,64 @@ export class Uploader {
   /**
    * Build the full S3 key for a file under the given target area.
    *
-   *   environment/{cluster_id}/{relativeKey}
+   *   environment/{cluster_id}/{relativeKey}                     (no group)
+   *   environment/{everforgeGroup}/{cluster_id}/{relativeKey}    (with group)
    *   knowledge-base/{relativeKey}
    *
    * For environment uploads, clusterId defaults to cluster_0 so existing
-   * single-cluster flows keep working.
+   * single-cluster flows keep working. When the cluster has an everforgeGroup
+   * configured, the key nests under that group.
    */
-  private buildS3Key(target: Target, relativeKey: string, clusterId?: string): string {
+  private buildS3Key(target: Target, relativeKey: string, clusterId?: string, everforgeGroup?: string | null): string {
     if (target === "environment") {
       const cluster = clusterId ?? DEFAULT_CLUSTER_ID;
+      if (everforgeGroup) {
+        return `environment/${everforgeGroup}/${cluster}/${relativeKey}`;
+      }
       return `environment/${cluster}/${relativeKey}`;
     }
     return `${target}/${relativeKey}`;
+  }
+
+  /**
+   * Resolve the everforgeGroup for a cluster by fetching its config.
+   * Returns null if the cluster has no group or if the config can't be read.
+   */
+  private async resolveEverforgeGroup(clusterId?: string): Promise<string | null> {
+    try {
+      const config = await this.flockClient.getConfig(clusterId);
+      return (config as unknown as Record<string, unknown>).everforgeGroup as string | null || null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Upload a file or folder to the given target area, auto-detecting which.
+   * Returns a description of what was uploaded.
+   *
+   * @param target       which area to upload into
+   * @param localPath    path to the local file or folder
+   * @param key          for files: destination key (defaults to basename).
+   *                     for folders: prefix to nest under (defaults to root).
+   * @param clusterId    target cluster for environment uploads; ignored for knowledge-base
+   */
+  async upload(
+    target: Target,
+    localPath: string,
+    key?: string,
+    clusterId?: string
+  ): Promise<{ type: "file" | "folder"; keys: string[] }> {
+    const { stat } = await import("node:fs/promises");
+    const info = await stat(localPath);
+
+    if (info.isDirectory()) {
+      const keys = await this.uploadFolder(target, localPath, key, clusterId);
+      return { type: "folder", keys };
+    } else {
+      const uploaded = await this.uploadFile(target, localPath, key, clusterId);
+      return { type: "file", keys: [uploaded] };
+    }
   }
 
   /**
@@ -117,7 +163,8 @@ export class Uploader {
     const { s3, bucket } = await this.getS3();
 
     const resolvedKey = key ?? basename(localPath);
-    const s3Key = this.buildS3Key(target, resolvedKey, clusterId);
+    const everforgeGroup = target === "environment" ? await this.resolveEverforgeGroup(clusterId) : null;
+    const s3Key = this.buildS3Key(target, resolvedKey, clusterId, everforgeGroup);
 
     const content = await readFile(localPath);
     const contentType = guessContentType(localPath);
@@ -155,7 +202,11 @@ export class Uploader {
     const files = await collectFiles(localPath);
     const uploaded: string[] = [];
 
+    // Resolve the group once for the batch rather than per-file
+    const everforgeGroup = target === "environment" ? await this.resolveEverforgeGroup(clusterId) : null;
+
     // Upload in parallel batches of 10 to avoid overwhelming S3
+    const { s3, bucket } = await this.getS3();
     const batchSize = 10;
     for (let i = 0; i < files.length; i += batchSize) {
       const batch = files.slice(i, i + batchSize);
@@ -163,10 +214,23 @@ export class Uploader {
         batch.map(async (filePath) => {
           const rel = relative(localPath, filePath);
           const key = prefix ? `${prefix.replace(/\/$/, "")}/${rel}` : rel;
-          return this.uploadFile(target, filePath, key, clusterId);
+          const s3Key = this.buildS3Key(target, key, clusterId, everforgeGroup);
+          const content = await readFile(filePath);
+          const contentType = guessContentType(filePath);
+          await s3.send(new PutObjectCommand({
+            Bucket: bucket,
+            Key: s3Key,
+            Body: content,
+            ContentType: contentType,
+          }));
+          return key;
         })
       );
       uploaded.push(...results);
+    }
+
+    if (target === "environment" && uploaded.length > 0) {
+      await this.appendReadEnvironmentToDirection(clusterId);
     }
 
     return uploaded;

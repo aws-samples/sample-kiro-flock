@@ -18,8 +18,8 @@ export interface AgentUserDataConfig {
   region: string;
   loopIntervalSeconds: number;
   model: string | null;
-  /** Pass 7: coordination algorithm. */
-  algorithm: "amorphous" | "mesh" | "swarm";
+  /** Pass 7: coordination algorithm. Pass 8: includes "single". */
+  algorithm: "amorphous" | "mesh" | "swarm" | "single";
   /** Pass 7: swarm peer count (ignored for other algorithms). */
   swarmK: number;
   /** Cluster this agent belongs to. Determines the S3 prefix the agent
@@ -31,6 +31,17 @@ export interface AgentUserDataConfig {
   /** When true (default), agents participate in autopause: cluster
    *  pauses itself after every agent reports idle for three iterations. */
   autopause?: boolean;
+  /** Pass 8: when true, the agent appends a self-reflection block to its
+   *  own per-agent directive after each iteration. Cluster direction is
+   *  untouched. */
+  selfOptimizing?: boolean;
+  /** When true, agents get a Puppeteer MCP server for headless browser
+   *  automation. */
+  browserAutomation?: boolean;
+  /** Optional Everforge group name. When set, the cluster's environment
+   *  prefix becomes `environment/<everforgeGroup>/<clusterId>/` and the
+   *  deployed/ folder lives at `environment/<everforgeGroup>/deployed/`. */
+  everforgeGroup?: string | null;
 }
 
 /** JSON-encode for embedding inside a single-quoted heredoc in bash. */
@@ -54,8 +65,35 @@ set -euxo pipefail
 # ---- 1. base packages ----------------------------------------------------
 dnf install -y unzip tar gzip
 # curl-minimal is pre-installed on AL2023 and conflicts with full curl, skip it
-# Node.js 20 (AL2023 ships with nodejs20 in the default repo)
-dnf install -y nodejs20 || dnf install -y nodejs
+# Node.js 22 (AL2023 provides nodejs22; fall back to 20 then generic)
+dnf install -y nodejs22 || dnf install -y nodejs20 || dnf install -y nodejs
+
+# The CDK CLI for deployer clusters, pinned to the version the flock is built
+# with (same pin as docker/Dockerfile.agent); the Deploy MCP runs cdk and
+# never installs it at run time.
+npm install -g aws-cdk@2.1148.1
+${cfg.browserAutomation ? `# Chromium for browser automation (ARM64, Amazon Linux 2023)
+# Playwright's built-in installer doesn't support AL2023 (tries apt-get).
+# Install the ARM64 chromium binary from Playwright CDN + system deps via dnf.
+dnf install -y nss atk at-spi2-atk cups-libs libdrm libXcomposite \\
+  libXdamage libXrandr mesa-libgbm pango alsa-lib gtk3 libXScrnSaver \\
+  xdg-utils || true
+mkdir -p /opt/chromium
+cd /opt/chromium
+PLAYWRIGHT_CDN="https://playwright.azureedge.net/builds/chromium"
+CHROMIUM_REV="1161"
+curl -sSL "$PLAYWRIGHT_CDN/$CHROMIUM_REV/chromium-linux-arm64.zip" -o chromium.zip
+unzip -q chromium.zip
+rm chromium.zip
+chmod +x chrome-linux/chrome
+ln -sf /opt/chromium/chrome-linux/chrome /usr/local/bin/chromium
+cd /
+# Pre-install the SAME puppeteer MCP server the agent actually launches
+# (@modelcontextprotocol/server-puppeteer) so the first browser iteration
+# doesn't download it. PUPPETEER_SKIP_DOWNLOAD stops it pulling a second
+# bundled Chromium — the agent points puppeteer at the ARM binary installed
+# above via /usr/local/bin/chromium.
+PUPPETEER_SKIP_DOWNLOAD=1 npm install -g @modelcontextprotocol/server-puppeteer` : "# Browser automation disabled — skipping Chromium install"}
 
 # ---- 2. kiro-cli ---------------------------------------------------------
 # The install script places binaries under ~/.local/bin. We install for
@@ -66,16 +104,30 @@ dnf install -y nodejs20 || dnf install -y nodejs
 # to install ("built for a GNU system with glibc 2.39 or newer"). The musl
 # build is statically linked and glibc-independent, so it runs on AL2023.
 #
-# Pinned to an exact version (not "latest") for reproducible builds — a new
-# "latest" could reintroduce the glibc break or otherwise shift under us.
-# Bump this deliberately after verifying the musl artifact resolves.
+# Pinned to an exact version (not "latest") for reproducible builds, with
+# the checksum the publisher ships beside it. Bump this together with
+# docker/Dockerfile.agent (KIROCLI_VERSION / KIROCLI_SHA256) so both compute
+# backends run the same kiro-cli; the runner starts the V3 harness, which
+# needs 3.0 or newer.
+# Download and extract on the root volume, NOT /tmp. On AL2023 /tmp is a
+# tmpfs sized at half of RAM; on small instance types (e.g. c8g.medium,
+# ~1.9 GiB RAM → 918M /tmp) the ~490M zip plus its ~430M extraction fills
+# it and the unzip corrupts mid-write, killing the rest of cloud-init.
+# The root volume always has room. Cleaned up after install.
 sudo -u ec2-user bash -eux <<'KIRO_INSTALL'
-cd /tmp
+INSTALL_DIR=/home/ec2-user/.kirocli-install
+mkdir -p "$INSTALL_DIR"
+cd "$INSTALL_DIR"
 curl --proto '=https' --tlsv1.2 -sSf \\
-  'https://desktop-release.q.us-east-1.amazonaws.com/2.11.1/kirocli-aarch64-linux-musl.zip' \\
-  -o /tmp/kirocli.zip
-unzip -q -o /tmp/kirocli.zip -d /tmp
-yes | /tmp/kirocli/install.sh || /tmp/kirocli/install.sh --no-confirm || true
+  'https://desktop-release.q.us-east-1.amazonaws.com/3.2.0/kirocli-aarch64-linux-musl.zip' \\
+  -o "$INSTALL_DIR/kirocli.zip"
+# Same SHA-256 as docker/Dockerfile.agent; bump both together.
+echo 'b94461d35b7dc934db4a39b59abc58cd87f3529e55367b9e4f3272058e5544af  '"$INSTALL_DIR/kirocli.zip" | sha256sum -c -
+unzip -q -o "$INSTALL_DIR/kirocli.zip" -d "$INSTALL_DIR"
+# The 3.x installer has no prompt; it must succeed or the instance is useless.
+"$INSTALL_DIR/kirocli/install.sh" --no-modify-path
+test -x /home/ec2-user/.local/bin/kiro-cli
+rm -rf "$INSTALL_DIR"
 KIRO_INSTALL
 
 # ---- 3. agent bundle -----------------------------------------------------

@@ -92,20 +92,95 @@ function buildTranslationPrompt(userPrompt: string, context: string): string {
 ${context}
 </available_clusters>
 
+<targets>
+Every operation addresses one of two things. Choose "target" FIRST, before anything else.
+
+**target: "agents"** (the default) — the unit is an agent. The data is each agent's
+NDJSON activity log (action / result / next_intent / iteration) and its per-agent
+directive. Use this when the question is about agent behaviour, progress, state, or
+when you need to send instructions.
+
+Signals: "which agents", "who is idle", "are they converging", "how many iterations",
+"what directive does each agent have", "tell them to...", "clear directives",
+"what have they been doing", "is anyone blocked".
+
+**target: "files"** — the unit is an S3 object. The data is the actual work product the
+flock wrote (source code, markdown, configs) under environment/ and optionally
+knowledge-base/. READ-ONLY: only type="reduce" is valid. Never emit map or map-clear
+with target "files".
+
+Signals: "in the code", "which files", "find X", "search for", "grep", "does anything
+use X", "how many files", "what did they write about X", "any TODOs", "show me the
+tests", anything naming a language construct, symbol, function, library, or file
+extension.
+
+**The crossover case.** When the predicate is about file CONTENT but the grouping asked
+for is agents ("show me agents who used while loops", "which agent wrote the retry
+logic"), use target "files" with fileQuery.groupBy = "agent". The engine scans content
+and then correlates matching files back to agents. Do NOT use target "agents" for
+these: agent logs do not contain source code, so the question is unanswerable there.
+</targets>
+
 <available_operations>
-1. **map** — Write a per-agent directive to targeted agents.
+1. **map** — Write a per-agent directive to targeted agents. target "agents" only.
    Required fields: type="map", filter, directive (the text to send)
 
-2. **map-clear** — Remove per-agent directives, returning agents to cluster-direction-only mode.
+2. **map-clear** — Remove per-agent directives, returning agents to cluster-direction-only mode. target "agents" only.
    Required fields: type="map-clear", filter
 
-3. **reduce** with mode="extract" — Structured data extraction from agent logs. Fast, no AI summarization.
-   Required fields: type="reduce", mode="extract", filter
-   Optional: query (with groupBy, select, where)
+3. **reduce** with mode="extract" — Structured extraction. Fast, no AI summarization.
+   target "agents": reads agent logs and directives.
+     Required: type="reduce", mode="extract", filter
+     Optional: query (with groupBy, select, where)
+   target "files": regex content scan over the flock's output.
+     Required: type="reduce", mode="extract", target="files", fileFilter
+     Optional: fileQuery (with groupBy)
 
-4. **reduce** with mode="summarize" — AI-powered summarization of targeted agents' activity.
-   Required fields: type="reduce", mode="summarize", filter, question
+4. **reduce** with mode="summarize" — AI-powered summarization.
+   Required fields: type="reduce", mode="summarize", question, plus the filter
+   appropriate to the target (filter for agents, fileFilter for files).
 </available_operations>
+
+<file_filter_schema>
+Used only when target is "files". All fields optional, AND composed.
+{
+  "clusters": ["cluster IDs whose environment folder to scan, omit for all clusters"],
+  "scope": ["environment", "knowledge-base"],
+  "pathGlob": "glob over the object key, supports **, *, ?, and {a,b} braces",
+  "contentRegex": "regex matched against file content, case-insensitive",
+  "modifiedAfter": "ISO-8601 instant, keep only files modified after this"
+}
+
+Guidance:
+- "scope" defaults to ["environment"] (the flock's own output). Only add
+  "knowledge-base" when the operator explicitly means reference material.
+- Omit "contentRegex" when the question is about the shape of the corpus rather than
+  its contents ("how many files did they write", "what files exist", "what was
+  touched in the last hour"). Without it the scan reads nothing and is very fast.
+- Use "pathGlob" to narrow to relevant file types before scanning content. For a code
+  construct use: "**/*.{ts,tsx,js,jsx,py,java,go,rs,rb,c,h,cpp,cs,kt,swift,sh}"
+- Write "contentRegex" as a real regex, not a plain substring, and anchor on word
+  boundaries where it avoids false positives. Escape backslashes correctly for JSON.
+  Examples:
+    while loops              -> "\\\\bwhile\\\\s*\\\\("
+    for loops                -> "\\\\bfor\\\\s*\\\\("
+    TODO or FIXME comments   -> "\\\\b(TODO|FIXME|HACK)\\\\b"
+    a named function         -> "\\\\bretryWithBackoff\\\\s*\\\\("
+    try/catch                -> "\\\\bcatch\\\\s*\\\\("
+    console logging          -> "console\\\\.(log|warn|error)"
+    a library import         -> "from\\\\s+['\\"]axios['\\"]"
+</file_filter_schema>
+
+<file_query_schema>
+Used only when target is "files".
+{
+  "groupBy": "file|cluster|directory|extension|agent"
+}
+- "file" (default) — one group per matching file.
+- "agent" — correlate matched files back to the agents whose logs reference them.
+  Use whenever the operator phrased the question in terms of agents.
+- "cluster", "directory", "extension" — aggregate views.
+</file_query_schema>
 
 <filter_schema>
 {
@@ -134,19 +209,26 @@ ${userPrompt}
 Convert the user's prompt into a structured operation. Respond with ONLY valid JSON (no markdown fences, no explanation):
 
 {
+  "target": "agents|files",
   "type": "map|map-clear|reduce",
   "filter": { ... },
+  "fileFilter": { ... },
+  "fileQuery": { "groupBy": "file|cluster|directory|extension|agent" },
   "directive": "for map: the full directive text to send to agents",
   "mode": "for reduce: extract|summarize",
-  "question": "for reduce/summarize: the question to answer about the agents",
+  "question": "for reduce/summarize: the question to answer",
   "query": {
-    "groupBy": "for reduce/extract: agentId|clusterId|action|nextIntent",
+    "groupBy": "for agents reduce/extract: agentId|clusterId|action|nextIntent",
     "select": ["fields to include in output"],
     "where": { "actionRegex": "...", "iterationGte": N, "iterationLte": N }
   }
 }
 
 Rules:
+- Decide "target" first. Emit it explicitly on every operation, even when it is "agents".
+- Never emit type "map" or "map-clear" with target "files". File operations are read-only.
+- With target "files", put targeting in "fileFilter" and shaping in "fileQuery". Do not
+  put file criteria in "filter" or "query".
 - Match cluster references to actual cluster IDs from the available_clusters list. "auth cluster" → find the cluster whose name or direction mentions auth.
 - "first 3 agents" → agentIndexes: [0, 1, 2]
 - "idle agents" → actionRegex: "idle"
@@ -155,10 +237,31 @@ Rules:
 - For map operations (directives), always use "all": true unless the user specifically targets a subset. This ensures rate-limited agents also receive the directive.
 - If the user asks a question ("what have they produced?", "are they converging?"), use reduce/summarize.
 - If the user asks for raw data ("show me", "list", "which agents"), use reduce/extract.
+- If the user asks about per-agent directives ("what directive does each agent have", "show me all individual directions", "list per-agent directions"), use reduce/extract grouped by agentId with select including "directive". The reduce engine reads the directive markdown for every targeted agent and returns it.
 - If the user gives an instruction to agents ("focus on X", "pivot to Y", "stop doing Z"), use map with all: true.
 - If the user says "clear directives" or "remove directives", use map-clear with all: true.
 - For map directives, write clear actionable instructions. Do not include the preamble (it's added automatically).
-- Only include fields relevant to the operation type. Do not include null or empty fields.`;
+- Only include fields relevant to the operation type. Do not include null or empty fields.
+
+Worked examples:
+
+"Which agents are idle?"
+{"target":"agents","type":"reduce","mode":"extract","filter":{"active":true},"query":{"groupBy":"agentId","select":["agentId","action","next_intent"]}}
+
+"Show me agents who used while loops"
+{"target":"files","type":"reduce","mode":"extract","fileFilter":{"scope":["environment"],"pathGlob":"**/*.{ts,tsx,js,jsx,py,java,go,rs}","contentRegex":"\\\\bwhile\\\\s*\\\\("},"fileQuery":{"groupBy":"agent"}}
+
+"Any TODOs left in the code?"
+{"target":"files","type":"reduce","mode":"extract","fileFilter":{"contentRegex":"\\\\b(TODO|FIXME)\\\\b"},"fileQuery":{"groupBy":"directory"}}
+
+"How many files has team-auth produced?"
+{"target":"files","type":"reduce","mode":"extract","fileFilter":{"clusters":["team-auth"]},"fileQuery":{"groupBy":"extension"}}
+
+"Is the error handling in the generated code any good?"
+{"target":"files","type":"reduce","mode":"summarize","question":"Is the error handling in the generated code sound, and where is it weakest?","fileFilter":{"pathGlob":"**/*.{ts,js,py,go}","contentRegex":"\\\\b(catch|except|rescue)\\\\b"}}
+
+"Tell every agent to write tests"
+{"target":"agents","type":"map","filter":{"all":true},"directive":"Before adding new features, write unit tests for the code you have already produced. Cover the failure paths, not just the happy path."}`;
 }
 
 export async function handler(event: TranslatorEvent): Promise<TranslatorResult> {
@@ -207,7 +310,21 @@ export async function handler(event: TranslatorEvent): Promise<TranslatorResult>
     if (!operation.type || !["map", "map-clear", "reduce"].includes(operation.type)) {
       throw new Error(`Invalid operation type: ${operation.type}`);
     }
-    if (!operation.filter) {
+    if (operation.target && !["agents", "files"].includes(operation.target)) {
+      throw new Error(`Invalid target: ${operation.target}`);
+    }
+
+    if (operation.target === "files") {
+      // Enforce read-only here as well as in the engine. A translator that
+      // hallucinates a write should fail with a clear message rather than
+      // reach the engine and be rejected there.
+      if (operation.type !== "reduce") {
+        throw new Error(
+          `target "files" is read-only, but the prompt was translated to "${operation.type}". Rephrase as a query, or address agents instead.`,
+        );
+      }
+      if (!operation.fileFilter) operation.fileFilter = {};
+    } else if (!operation.filter) {
       operation.filter = { all: true };
     }
 

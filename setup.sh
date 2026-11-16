@@ -15,16 +15,24 @@ MCP_DIR="$SCRIPT_DIR/kiro-flock-mcp"
 # ── Parse CLI flags (override config file) ────────────────────────────────────
 CLI_REGION=""
 CLI_PROFILE=""
+CLI_USERNAME=""
+KEEP=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --region)   CLI_REGION="$2";   shift 2 ;;
     --profile)  CLI_PROFILE="$2";  shift 2 ;;
+    --username) CLI_USERNAME="$2"; shift 2 ;;
+    --keep)     KEEP=true;         shift ;;
     -h|--help)
-      echo "Usage: ./setup.sh [--region REGION] [--profile PROFILE]"
+      echo "Usage: ./setup.sh [--region REGION] [--profile PROFILE] [--username USERNAME] [--keep]"
       echo ""
       echo "Flags override values from install.config. If no flags are given,"
       echo "all values are read from install.config."
+      echo ""
+      echo "  --keep    Deploy CDK only, skip MCP rebuild and reconfig."
+      echo "            Use when you only changed cluster code (Lambda, web, agent)"
+      echo "            and don't need to rebuild the local MCP server."
       exit 0
       ;;
     *) echo "Unknown option: $1"; exit 1 ;;
@@ -33,19 +41,21 @@ done
 
 # ── Load config file (if it exists) ──────────────────────────────────────────
 if [[ -f "$CONFIG_FILE" ]]; then
+  # shellcheck disable=SC1090  # install.config is written by the operator; its path is only known at run time
   source "$CONFIG_FILE"
 fi
 
 # ── Apply CLI overrides ──────────────────────────────────────────────────────
 [[ -n "$CLI_REGION" ]]   && REGION="$CLI_REGION"
 [[ -n "$CLI_PROFILE" ]]  && PROFILE="$CLI_PROFILE"
+[[ -n "$CLI_USERNAME" ]] && USERNAME="$CLI_USERNAME"
 
 # ── Validate required values ─────────────────────────────────────────────────
-if [[ -z "${REGION:-}" || -z "${PROFILE:-}" ]]; then
-  echo "ERROR: REGION and PROFILE must be set."
+if [[ -z "${REGION:-}" || -z "${PROFILE:-}" || -z "${USERNAME:-}" ]]; then
+  echo "ERROR: REGION, PROFILE, and USERNAME must be set."
   echo ""
   echo "Either create install.config (cp install.config.template install.config)"
-  echo "or pass both as flags: --region, --profile"
+  echo "or pass all three as flags: --region, --profile, --username"
   exit 1
 fi
 
@@ -69,22 +79,37 @@ echo "${B}${C}━━━━━━━━━━━━━━━━━━━━━━
 # ── Step 1: Deploy kiro-flock-cluster ─────────────────────────────────────────
 step "Step 1: Deploy kiro-flock CDK stack"
 
-AWS_REGION=$REGION AWS_PROFILE=$PROFILE bash "$CLUSTER_DIR/scripts/install.sh"
+if [[ "$KEEP" == true ]]; then
+  AWS_REGION=$REGION AWS_PROFILE=$PROFILE bash "$CLUSTER_DIR/scripts/install.sh" --keep
+else
+  AWS_REGION=$REGION AWS_PROFILE=$PROFILE bash "$CLUSTER_DIR/scripts/install.sh"
+fi
 ok "kiro-flock-cluster deployed"
 
 # ── Step 2: Build the MCP server ─────────────────────────────────────────────
-step "Step 2: Build kiro-flock-mcp"
+if [[ "$KEEP" == true ]]; then
+  ok "Skipping MCP build (--keep)"
+else
+  step "Step 2: Build kiro-flock-mcp"
 
-npm install --prefix "$MCP_DIR" --silent
-npm run build --prefix "$MCP_DIR"
-ok "MCP server built"
+  # NOTE (Windows/Git Bash): `npm --prefix "$MCP_DIR"` mangles the path on
+  # Windows (prepends a stray drive segment, e.g. C:\c\work\...), producing an
+  # ENOENT for package.json. Use a cd subshell instead, which is portable.
+  ( cd "$MCP_DIR" && npm install )
+  ( cd "$MCP_DIR" && npm run build )
+  ok "MCP server built"
+fi
 
 # ── Step 3: Configure the MCP server ─────────────────────────────────────────
-step "Step 3: Configure kiro-flock-mcp"
+if [[ "$KEEP" == true ]]; then
+  ok "Skipping MCP config (--keep)"
+else
+  step "Step 3: Configure kiro-flock-mcp"
 
-bash "$MCP_DIR/scripts/get-mcp-env.sh" \
-  --region "$REGION" \
-  --profile "$PROFILE"
+  bash "$MCP_DIR/scripts/get-mcp-env.sh" \
+    --region "$REGION" \
+    --profile "$PROFILE"
+fi
 
 # ── Done ──────────────────────────────────────────────────────────────────────
 echo ""

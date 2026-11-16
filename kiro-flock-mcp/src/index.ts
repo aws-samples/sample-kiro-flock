@@ -34,8 +34,11 @@ import {
 import { FlockClient } from "./flockClient.js";
 import { Uploader } from "./feeder.js";
 import { StoreReader } from "./storeReader.js";
+import { AcpReader } from "./acpReader.js";
 import { AuthManager } from "./authManager.js";
 import { TOOLS } from "./tools.js";
+import * as coderSync from "./coderSync.js";
+import { stateFilePath, loadState } from "./coderState.js";
 
 // Minimal CRC-32 for ZIP file generation (STORE mode, no compression).
 // Same table-based approach the web dashboard uses in envPanel.js.
@@ -89,6 +92,10 @@ const auth = new AuthManager({
 const client = new FlockClient(apiUrl, auth);
 const uploader = new Uploader(client);
 const store = new StoreReader();
+const acpReader = new AcpReader();
+
+// ── Coder sync state ─────────────────────────────────────────────────────────
+let coderActiveRoot: string | null = null;
 
 /**
  * Feature flag gate for the presigned-URL path for store_read_all.
@@ -113,6 +120,41 @@ function isAnalysisUrlModeEnabled(): boolean {
 function pickClusterId(a: Record<string, unknown>): string | undefined {
   const v = a.cluster_id;
   return typeof v === "string" && v.length > 0 ? v : undefined;
+}
+
+/**
+ * List environment files scoped to a single cluster.
+ *
+ * The backend `habitat` endpoint deliberately returns the entire
+ * `environment/` tree across every cluster (the web dashboard renders a
+ * unified tree). That is far too much for an MCP caller and blows the
+ * context window. So when a cluster_id is supplied we resolve its env
+ * prefix — honouring an everforgeGroup when configured — and filter the
+ * listing down to just that cluster's files. With no cluster_id we return
+ * everything, preserving the "unless cluster is not set" contract.
+ */
+async function listScopedEnvironment(clusterId?: string) {
+  const allFiles = await client.listEnvironment(clusterId);
+  if (!clusterId) return allFiles;
+  const scopePrefix = await resolveEnvPrefix(clusterId);
+  return allFiles.filter((f) => f.key.startsWith(scopePrefix));
+}
+
+/**
+ * Resolve a cluster's environment prefix, honouring an everforgeGroup when
+ * one is configured. Falls back to the ungrouped prefix if the config can't
+ * be read (never-started cluster, transient error).
+ */
+async function resolveEnvPrefix(clusterId: string): Promise<string> {
+  try {
+    const cfg = await client.getConfig(clusterId);
+    const group = (cfg as unknown as Record<string, unknown>).everforgeGroup as string | null;
+    return group
+      ? `environment/${group}/${clusterId}/`
+      : `environment/${clusterId}/`;
+  } catch {
+    return `environment/${clusterId}/`;
+  }
 }
 
 /**
@@ -187,6 +229,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return { content: [{ type: "text", text: "Cluster resumed. Agents will pick up their loop within 10 s." }] };
       }
 
+      case "models_list": {
+        const catalog = await client.listModels();
+        return { content: [{ type: "text", text: JSON.stringify(catalog, null, 2) }] };
+      }
+
       case "cluster_config_get": {
         const cfg = await client.getConfig(clusterId);
         return { content: [{ type: "text", text: JSON.stringify(cfg, null, 2) }] };
@@ -211,21 +258,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       // ── Knowledge-base (shared across all clusters) ────────────────────
-      case "kb_upload_file": {
+      case "kb_upload": {
         const localPath = a.local_path as string;
         const key = a.key as string | undefined;
-        const uploaded = await uploader.uploadFile("knowledge-base", localPath, key);
-        return { content: [{ type: "text", text: `Uploaded to knowledge-base: ${uploaded}` }] };
-      }
-
-      case "kb_upload_folder": {
-        const localPath = a.local_path as string;
-        const prefix = a.prefix as string | undefined;
-        const results = await uploader.uploadFolder("knowledge-base", localPath, prefix);
+        const result = await uploader.upload("knowledge-base", localPath, key);
+        if (result.type === "file") {
+          return { content: [{ type: "text", text: `Uploaded to knowledge-base: ${result.keys[0]}` }] };
+        }
         return {
           content: [{
             type: "text",
-            text: `Uploaded ${results.length} file(s) to knowledge-base:\n${results.map((r: string) => `  ${r}`).join("\n")}`,
+            text: `Uploaded ${result.keys.length} file(s) to knowledge-base:\n${result.keys.map((r: string) => `  ${r}`).join("\n")}`,
           }],
         };
       }
@@ -242,27 +285,23 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       // ── Environment (per-cluster, archived on cluster_start) ───────────
-      case "env_upload_file": {
+      case "env_upload": {
         const localPath = a.local_path as string;
         const key = a.key as string | undefined;
-        const uploaded = await uploader.uploadFile("environment", localPath, key, clusterId);
-        return { content: [{ type: "text", text: `Uploaded to environment: ${uploaded}` }] };
-      }
-
-      case "env_upload_folder": {
-        const localPath = a.local_path as string;
-        const prefix = a.prefix as string | undefined;
-        const results = await uploader.uploadFolder("environment", localPath, prefix, clusterId);
+        const result = await uploader.upload("environment", localPath, key, clusterId);
+        if (result.type === "file") {
+          return { content: [{ type: "text", text: `Uploaded to environment: ${result.keys[0]}` }] };
+        }
         return {
           content: [{
             type: "text",
-            text: `Uploaded ${results.length} file(s) to environment:\n${results.map((r: string) => `  ${r}`).join("\n")}`,
+            text: `Uploaded ${result.keys.length} file(s) to environment:\n${result.keys.map((r: string) => `  ${r}`).join("\n")}`,
           }],
         };
       }
 
       case "env_list": {
-        const files = await client.listEnvironment(clusterId);
+        const files = await listScopedEnvironment(clusterId);
         return { content: [{ type: "text", text: JSON.stringify(files, null, 2) }] };
       }
 
@@ -272,15 +311,35 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return { content: [{ type: "text", text: content }] };
       }
 
+      case "env_delete": {
+        // Explicit folder wins; otherwise resolve the target cluster's env
+        // prefix (group-aware). The backend rejects the bare environment/
+        // root, so a whole-environment wipe is only reachable by deleting
+        // cluster folders one at a time — deliberate for an AI caller.
+        let folder = (a.folder as string | undefined)?.trim();
+        if (folder) {
+          if (!folder.endsWith("/")) folder += "/";
+          if (!folder.startsWith("environment/")) {
+            throw new Error(`folder must start with "environment/" (got "${folder}")`);
+          }
+        } else {
+          folder = await resolveEnvPrefix(clusterId ?? "cluster_0");
+        }
+        const result = await client.deleteEnvironmentFolder(folder);
+        return {
+          content: [{
+            type: "text",
+            text: `Permanently deleted ${result.deleted} file(s) from ${result.folder}. No history/ copy was made — this is irreversible.`,
+          }],
+        };
+      }
+
       case "env_download_all": {
-        // Always fetch the full environment listing (backend returns all
-        // clusters regardless of the clusterId in the URL). Then filter
-        // client-side when a specific cluster was requested.
-        const allFiles = await client.listEnvironment(clusterId);
-        const scopePrefix = clusterId ? `environment/${clusterId}/` : null;
-        const files = scopePrefix
-          ? allFiles.filter(f => f.key.startsWith(scopePrefix))
-          : allFiles;
+        // Scope the listing to the requested cluster (or everything when
+        // no cluster_id is set). The backend habitat endpoint returns all
+        // clusters regardless of the URL, so listScopedEnvironment filters
+        // client-side.
+        const files = await listScopedEnvironment(clusterId);
         if (files.length === 0) {
           return { content: [{ type: "text", text: "No environment files to download." }] };
         }
@@ -383,6 +442,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return { content: [{ type: "text", text: JSON.stringify(logs, null, 2) }] };
       }
 
+      // ── ACP session streaming ────────────────────────────────────────────
+      case "list_acp_sessions": {
+        const agentIndex = typeof a.agent_index === "number" ? a.agent_index : 0;
+        const cid = clusterId ?? "cluster_0";
+        const result = await acpReader.listSessions(cid, agentIndex);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      }
+
+      case "stream_acp": {
+        const agentIndex = typeof a.agent_index === "number" ? a.agent_index : 0;
+        const offset = typeof a.offset === "number" ? a.offset : 0;
+        const cid = clusterId ?? "cluster_0";
+        const result = await acpReader.readAgentSessions(cid, agentIndex, offset);
+        return { content: [{ type: "text", text: result }] };
+      }
+
       // ── Store (post-run analysis) ────────────────────────────────────────
       case "store_list": {
         const files = await store.listStoreLogs(clusterId);
@@ -403,13 +478,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         //   bypassing the 10 MB API Gateway response cap.
         //   When unset, fall through to the direct-S3 StoreReader path, which
         //   is the current behaviour and is unchanged.
+        //   Server side lands in a later round (kiro-flock/tasks.md Pass 5).
         if (isAnalysisUrlModeEnabled()) {
           const result = await client.fetchAnalysisViaUrl(clusterId);
           if (result.status === "pending") {
             const pending = { status: "pending", retryAfter: result.retryAfter };
             return { content: [{ type: "text", text: JSON.stringify(pending, null, 2) }] };
           }
-          return { content: [{ type: "text", text: JSON.stringify(result.data, null, 2) }] };
+          // An empty artifact usually means the run's logs were already
+          // rotated into history/ (cluster stopped or restarted). The direct
+          // reader below falls back to the newest archive, so let it try
+          // before returning an empty result for a run that has data.
+          const data = result.data as { totalEntries?: number } | undefined;
+          if (data && data.totalEntries !== 0) {
+            return { content: [{ type: "text", text: JSON.stringify(result.data, null, 2) }] };
+          }
         }
         const allLogs = await store.readAllLogs(clusterId);
         return { content: [{ type: "text", text: JSON.stringify(allLogs, null, 2) }] };
@@ -454,6 +537,361 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const { tabId } = (await res.json()) as { tabId: string };
         const result = await pollMapReduceTab(tabId);
         return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      }
+
+      // ── Deployment records (operator-side) ───────────────────────────────
+      case "deploy_record_list": {
+        const systemname = a.systemname as string | undefined;
+        const result = await client.deployRecordList(systemname, clusterId);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      }
+
+      case "deploy_record_write": {
+        const bucket = process.env.FLOCK_S3_BUCKET;
+        const s3Region = process.env.FLOCK_S3_REGION ?? process.env.AWS_DEFAULT_REGION ?? "eu-central-1";
+        if (!bucket) {
+          return { content: [{ type: "text", text: "FLOCK_S3_BUCKET not configured. Re-run setup.sh." }], isError: true };
+        }
+
+        const systemname = a.systemname as string;
+        const stackName = a.stackName as string;
+        const url = a.url as string;
+        const changelogEntry = a.changelog_entry as string;
+        const status = (a.status as string) ?? "UPDATE_COMPLETE";
+        const region = (a.region as string) ?? s3Region;
+        const deploymentTime = (a.deploymentTime as string) ?? undefined;
+        const outputs = (a.outputs as Record<string, string>) ?? undefined;
+
+        // Resolve everforgeGroup from cluster config
+        let everforgeGroup: string | null = null;
+        try {
+          const config = await client.getConfig(clusterId);
+          everforgeGroup = (config as unknown as Record<string, unknown>).everforgeGroup as string | null || null;
+        } catch { /* no group */ }
+
+        // Build the deployed/ prefix
+        const deployedPrefix = everforgeGroup
+          ? `environment/${everforgeGroup}/deployed`
+          : "environment/deployed";
+
+        const timestamp = new Date().toISOString();
+
+        // 1. Write latest.json
+        const latestJson: Record<string, unknown> = {
+          stackName,
+          timestamp,
+          status,
+          url,
+          apiUrl: url,
+          region,
+          systemname,
+          deployedBy: "local-user",
+        };
+        if (deploymentTime) latestJson.deploymentTime = deploymentTime;
+        if (outputs) latestJson.outputs = outputs;
+
+        const { S3Client, PutObjectCommand, GetObjectCommand } = await import("@aws-sdk/client-s3");
+        const { fromNodeProviderChain } = await import("@aws-sdk/credential-providers");
+        const s3 = new S3Client({ region: s3Region, credentials: fromNodeProviderChain() });
+
+        await s3.send(new PutObjectCommand({
+          Bucket: bucket,
+          Key: `${deployedPrefix}/latest.json`,
+          Body: JSON.stringify(latestJson, null, 2),
+          ContentType: "application/json",
+        }));
+
+        // 2. Update changelog.md (read existing, prepend new entry with [DEPLOYED] marker)
+        let existingChangelog = "";
+        try {
+          const resp = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: `${deployedPrefix}/changelog.md` }));
+          existingChangelog = await resp.Body!.transformToString();
+        } catch { /* file may not exist yet */ }
+
+        // Remove previous [DEPLOYED] marker
+        const cleanedChangelog = existingChangelog.replace(/\[DEPLOYED\]\s*/g, "");
+
+        const newEntry = `## [DEPLOYED] ${timestamp} — ${systemname}\n\n${changelogEntry}\n\n- Stack: ${stackName} (${status}${deploymentTime ? `, ${deploymentTime}` : ""})\n- URL: ${url}\n- Deployed by: local-user\n`;
+        const fullChangelog = newEntry + "\n" + cleanedChangelog;
+
+        await s3.send(new PutObjectCommand({
+          Bucket: bucket,
+          Key: `${deployedPrefix}/changelog.md`,
+          Body: fullChangelog,
+          ContentType: "text/markdown",
+        }));
+
+        // 3. Write deployment-{systemname}.md record
+        const outputLines = outputs
+          ? Object.entries(outputs).map(([k, v]) => `  ${k}: "${v}"`)
+          : [];
+        const outputSection = outputs
+          ? Object.entries(outputs).map(([k, v]) => `- **${k}**: ${v}`)
+          : [];
+        const recordBody = [
+          "---",
+          `systemname: ${systemname}`,
+          `mode: remote`,
+          `agentId: local-user`,
+          `clusterId: ${clusterId ?? "local"}`,
+          `deployedAt: ${timestamp}`,
+          `stackName: ${stackName}`,
+          ...(outputLines.length ? ["outputs:", ...outputLines] : []),
+          "---",
+          "",
+          `# Deployment: ${systemname}`,
+          "",
+          `Remote deployment (CDK) by local-user.`,
+          "",
+          `**Stack:** ${stackName}`,
+          `**Status:** ${status}`,
+          `**URL:** ${url}`,
+          ...(outputSection.length ? ["", "**Outputs:**", ...outputSection] : []),
+          "",
+        ].join("\n");
+
+        await s3.send(new PutObjectCommand({
+          Bucket: bucket,
+          Key: `${deployedPrefix}/deployment-${systemname}.md`,
+          Body: recordBody,
+          ContentType: "text/markdown",
+        }));
+
+        const summary = [
+          `Deployment recorded for ${systemname}:`,
+          `  latest.json: ${deployedPrefix}/latest.json`,
+          `  changelog:   ${deployedPrefix}/changelog.md`,
+          `  record:      ${deployedPrefix}/deployment-${systemname}.md`,
+          "",
+          `Stack: ${stackName}`,
+          `URL: ${url}`,
+          `Timestamp: ${timestamp}`,
+        ].join("\n");
+        return { content: [{ type: "text", text: summary }] };
+      }
+
+      case "deploy_destroy": {
+        const group = typeof a.group === "string" && a.group.trim() !== "" ? a.group.trim() : null;
+        const confirm = typeof a.confirm === "string" ? a.confirm : null;
+
+        // Always resolve the stack first — both steps need it, and a wrong
+        // group should fail loudly before anything is deleted.
+        const info = await client.stackInfo(group);
+        if (!info.stackName) {
+          return {
+            content: [{ type: "text", text: info.error ?? "No stack found for this deployment group." }],
+            isError: true,
+          };
+        }
+
+        const phrase = `goodbye ${info.stackName}`;
+        const runningNote = info.deployerRunning
+          ? `WARNING: deployer cluster(s) for this group are still active (${info.clusters
+              .filter((c) => c.state !== "stopped")
+              .map((c) => `${c.name}: ${c.state}`)
+              .join(", ")}). Destruction is allowed, but a running deployer may redeploy the stack afterwards.`
+          : "No deployer cluster for this group is running.";
+
+        if (confirm !== phrase) {
+          const preview = {
+            status: "confirmation_required",
+            stackName: info.stackName,
+            stackStatus: info.stackStatus,
+            clusters: info.clusters,
+            deployerRunning: info.deployerRunning,
+            note: runningNote,
+            message:
+              `This will permanently delete CloudFormation stack "${info.stackName}" and all its resources. ` +
+              `Deployment records under environment/ are kept as the audit trail. ` +
+              `To proceed, call deploy_destroy again with confirm: "${phrase}".`,
+          };
+          return { content: [{ type: "text", text: JSON.stringify(preview, null, 2) }] };
+        }
+
+        const result = await client.destroyStack(group);
+        const done = {
+          ...result,
+          note: runningNote,
+          records: "Deployment records under environment/ were kept; use env_delete to remove them.",
+        };
+        return { content: [{ type: "text", text: JSON.stringify(done, null, 2) }] };
+      }
+
+      // ── Coder (local IDE sync) ─────────────────────────────────────────
+      case "coder_attach": {
+        const group = a.group as string;
+        const localPath = a.path as string;
+        if (!group) {
+          return { content: [{ type: "text", text: "group is required" }], isError: true };
+        }
+        if (!localPath) {
+          return { content: [{ type: "text", text: "path is required" }], isError: true };
+        }
+        const bucket = process.env.FLOCK_S3_BUCKET;
+        const coderRegion = process.env.FLOCK_S3_REGION ?? process.env.AWS_DEFAULT_REGION ?? "eu-central-1";
+        const coderProfile = process.env.AWS_PROFILE || undefined;
+        if (!bucket) {
+          return { content: [{ type: "text", text: "FLOCK_S3_BUCKET not configured. Re-run setup.sh." }], isError: true };
+        }
+        const result = await coderSync.attach(bucket, coderRegion, coderProfile, group, localPath);
+        coderActiveRoot = result.localPath;
+        const lines = [
+          `Attached to group: ${group}`,
+          `Local path: ${result.localPath}`,
+          `Files downloaded: ${result.fileCount}`,
+          "",
+          "Open this directory in your IDE to start editing.",
+          "Use coder_push to upload changes, coder_pull to get remote updates.",
+          "Use coder_log to tell agents what you're working on.",
+        ];
+        if (result.skipped.length > 0) {
+          lines.push("", `Skipped ${result.skipped.length} remote key(s) whose path would leave the local folder:`, ...result.skipped.map(k => `  ! ${k}`));
+        }
+        if (result.fileCount <= 50) {
+          lines.push("", "Files:", ...result.files.map(f => `  ${f}`));
+        }
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+      }
+
+      case "coder_pull": {
+        if (!coderActiveRoot) {
+          return { content: [{ type: "text", text: "Not attached to any cluster. Run coder_attach first." }], isError: true };
+        }
+        const result = await coderSync.pull(coderActiveRoot);
+        const lines: string[] = [];
+        if (result.downloaded.length > 0) {
+          lines.push(`Downloaded (${result.downloaded.length}):`);
+          lines.push(...result.downloaded.map(f => `  ↓ ${f}`));
+        }
+        if (result.deleted.length > 0) {
+          lines.push(`Deleted locally (${result.deleted.length}):`);
+          lines.push(...result.deleted.map(f => `  ✕ ${f}`));
+        }
+        if (result.conflicts.length > 0) {
+          lines.push(`Conflicts (${result.conflicts.length}) — skipped:`);
+          lines.push(...result.conflicts.map(f => `  ⚠ ${f}`));
+          lines.push("", "Resolve conflicts manually, then push or pull again.");
+        }
+        if (result.skipped.length > 0) {
+          lines.push(`Skipped ${result.skipped.length} remote key(s) whose path would leave the local folder:`);
+          lines.push(...result.skipped.map(k => `  ! ${k}`));
+        }
+        if (lines.length === 0) {
+          lines.push(`Up to date. (${result.unchanged} files unchanged)`);
+        }
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+      }
+
+      case "coder_push": {
+        if (!coderActiveRoot) {
+          return { content: [{ type: "text", text: "Not attached to any cluster. Run coder_attach first." }], isError: true };
+        }
+        const message = a.message as string | undefined;
+        const result = await coderSync.push(coderActiveRoot, message);
+        const lines: string[] = [];
+        if (result.pushed.length > 0) {
+          lines.push(`Pushed (${result.pushed.length}):`);
+          lines.push(...result.pushed.map(f => `  ↑ ${f}`));
+        }
+        if (result.deleted.length > 0) {
+          lines.push(`Deleted remotely (${result.deleted.length}):`);
+          lines.push(...result.deleted.map(f => `  ✕ ${f}`));
+        }
+        if (result.conflicts.length > 0) {
+          lines.push(`\nConflicts (${result.conflicts.length}) — NOT pushed:`);
+          for (const c of result.conflicts) {
+            lines.push(`\n  ⚠ ${c.file}`);
+            lines.push(c.diff);
+          }
+          lines.push("\nPull first to get remote versions, then re-push.");
+        }
+        if (result.pushed.length === 0 && result.deleted.length === 0 && result.conflicts.length === 0) {
+          lines.push("Nothing to push. Local copy matches last sync state.");
+        }
+        if (message && (result.pushed.length > 0 || result.deleted.length > 0)) {
+          lines.push(`\nChangelog written to coder-log.md`);
+        }
+
+        // Auto-append coder-log check to directions of running clusters in this group
+        if (result.pushed.length > 0 || result.deleted.length > 0) {
+          const state = await loadState(coderActiveRoot);
+          if (state) {
+            const suffix = `Check environment/${state.group}/coder-log.md each iteration for human developer updates and incorporate them.`;
+            try {
+              const clusters = await client.listClusters();
+              const groupClusters = (clusters as unknown as Array<{ id: string; state: string; config?: { everforgeGroup?: string } }>)
+                .filter(c => c.config?.everforgeGroup === state.group && c.state === "running");
+              for (const c of groupClusters) {
+                const direction = await client.getDirection(c.id).catch(() => "");
+                if (!direction.includes(suffix)) {
+                  await client.setDirection(direction ? `${direction}\n\n${suffix}` : suffix, c.id);
+                }
+              }
+              if (groupClusters.length > 0) {
+                lines.push(`\nAppended coder-log instruction to ${groupClusters.length} running cluster(s).`);
+              }
+            } catch {
+              // Non-fatal: direction update is best-effort
+            }
+          }
+        }
+
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+      }
+
+      case "coder_status": {
+        if (!coderActiveRoot) {
+          return { content: [{ type: "text", text: "Not attached to any cluster. Run coder_attach first." }], isError: true };
+        }
+        const result = await coderSync.status(coderActiveRoot);
+        const lines: string[] = [];
+        if (result.localChanges.length > 0) {
+          lines.push(`Local changes (not pushed):`);
+          lines.push(...result.localChanges.map(f => `  M ${f}`));
+        }
+        if (result.localDeleted.length > 0) {
+          lines.push(`Deleted locally (not pushed):`);
+          lines.push(...result.localDeleted.map(f => `  D ${f}`));
+        }
+        if (result.remoteChanges.length > 0) {
+          lines.push(`Remote changes (not pulled):`);
+          lines.push(...result.remoteChanges.map(f => `  ↓ ${f}`));
+        }
+        if (result.remoteDeleted.length > 0) {
+          lines.push(`Deleted remotely (not pulled):`);
+          lines.push(...result.remoteDeleted.map(f => `  ✕ ${f}`));
+        }
+        if (result.conflicts.length > 0) {
+          lines.push(`Conflicts (both changed):`);
+          lines.push(...result.conflicts.map(f => `  ⚠ ${f}`));
+        }
+        if (lines.length === 0) {
+          lines.push("Clean. Local and remote are in sync.");
+        }
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+      }
+
+      case "coder_log": {
+        if (!coderActiveRoot) {
+          return { content: [{ type: "text", text: "Not attached to any cluster. Run coder_attach first." }], isError: true };
+        }
+        const message = a.message as string;
+        if (!message) {
+          return { content: [{ type: "text", text: "message is required" }], isError: true };
+        }
+        const result = await coderSync.logMessage(coderActiveRoot, message);
+        return { content: [{ type: "text", text: result }] };
+      }
+
+      case "coder_detach": {
+        if (!coderActiveRoot) {
+          return { content: [{ type: "text", text: "Not attached to anything." }], isError: true };
+        }
+        const sf = stateFilePath(coderActiveRoot);
+        try { await (await import("node:fs/promises")).unlink(sf); } catch { /* already gone */ }
+        const path = coderActiveRoot;
+        coderActiveRoot = null;
+        return { content: [{ type: "text", text: `Detached. Local files remain at ${path}` }] };
       }
 
       default:

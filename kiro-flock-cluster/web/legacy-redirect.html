@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>kiro-flock</title>
+<script>
+  // Served at the legacy /welten and /forge routes. The three separate
+  // UIs merged into the unified shell at the stage root; this page maps
+  // old bookmarks onto the matching accordion section and redirects.
+  (function() {
+    var path = location.pathname.replace(/\/+$/, "");
+    var section = "";
+    if (/\/welten$/.test(path)) section = "#multi-cluster";
+    else if (/\/forge$/.test(path)) section = "#continuous";
+    var stageRoot = path.replace(/\/(welten|forge)$/, "") + "/";
+    location.replace(location.origin + stageRoot + section);
+  })();
+</script>
+</head>
+<body>Redirecting to the unified dashboard&#8230;</body>
+</html>

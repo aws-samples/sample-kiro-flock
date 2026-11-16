@@ -1,0 +1,620 @@
+/* ============================================================================
+   Unified shell stylesheet.
+
+   Owns: design tokens, top bar, horizontal accordion (rails + panes),
+   right environment column, bottom analyzer drawer, toast, confirm modal.
+
+   Section-specific styles live in sections/<id>.css, scoped under their
+   own pane. The default (amorphous dark) palette below is the app-wide
+   theme; the single-cluster section re-tints ITS OWN pane per algorithm.
+   ============================================================================ */
+
+:root {
+  --bg: #0a0a0f;
+  --surface: #111118;
+  --surface-2: #1a1a24;
+  --border: #2a2a3a;
+  --border-light: #3a3a50;
+  --text: #ffffff;
+  --text-dim: #e6e6f0;
+  /* Deliberately light for a "muted" tone — the old #a0a0b8 was hard to
+     read at the small sizes it's used at (hints, labels, meta lines). */
+  --text-muted: #b6bac9;
+  --accent: #9046ff;
+  --accent-dim: rgba(144, 70, 255, 0.18);
+  --accent-hover: #a060ff;
+  --green: #34d399;
+  --green-dim: rgba(52, 211, 153, 0.15);
+  --yellow: #facc15;
+  --yellow-dim: rgba(250, 204, 21, 0.15);
+  --red: #fb7185;
+  --red-dim: rgba(251, 113, 133, 0.15);
+  --cost: #e8a45c;
+  --cost-dim: rgba(232, 164, 92, 0.15);
+  --mono: 'SF Mono', 'Cascadia Code', 'Fira Code', 'Menlo', monospace;
+  --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --radius: 6px;
+  --radius-lg: 8px;
+  --rail-w: 44px;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body { height: 100%; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.5;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ---------- Top bar --------------------------------------------------------- */
+
+.sh-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  flex-shrink: 0;
+  gap: 16px;
+  min-height: 52px;
+}
+.sh-topbar-left {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  min-width: 0;
+  flex: 1;
+}
+.sh-topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+.sh-logo {
+  font-family: var(--mono);
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--accent);
+  letter-spacing: -0.5px;
+  flex-shrink: 0;
+}
+.sh-logo span { color: var(--text-dim); font-weight: 400; }
+.sh-logo .version-label {
+  display: block;
+  font-size: 9px;
+  font-weight: 300;
+  color: var(--text-dim);
+  letter-spacing: 0.5px;
+  margin-top: -2px;
+}
+
+/* Section-contextual slot. The active section injects its own controls
+   (cluster picker + badge + timer, Pause All / Stop All, Clear Cache…). */
+.sh-topbar-context {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.sh-poll-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  letter-spacing: 0.3px;
+  white-space: nowrap;
+}
+.sh-poll-indicator.error { color: var(--red); }
+
+.sh-topbtn {
+  font-size: 11px;
+  padding: 4px 12px;
+  background: var(--surface-2);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-family: var(--sans);
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+}
+.sh-topbtn:hover:not(:disabled) { color: var(--text); border-color: var(--border-light); }
+.sh-topbtn:disabled { opacity: 0.4; cursor: not-allowed; }
+.sh-topbtn--danger:hover:not(:disabled) { color: var(--red); border-color: var(--red); }
+
+/* Icon-sized square variant (dashboard button). */
+.sh-topbtn-icon {
+  padding: 5px;
+  width: 26px;
+  height: 26px;
+  justify-content: center;
+}
+.sh-topbtn-icon svg { display: block; }
+.sh-topbtn-icon:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
+
+/* Cluster state badge (used by the single-cluster context controls). */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 20px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  white-space: nowrap;
+}
+.badge::before { content: ''; width: 6px; height: 6px; border-radius: 50%; }
+.badge-running { background: var(--green-dim); color: var(--green); }
+.badge-running::before { background: var(--green); box-shadow: 0 0 8px var(--green); }
+.badge-starting { background: var(--accent-dim); color: var(--accent); }
+.badge-starting::before { background: var(--accent); animation: sh-pulse 1.5s ease-in-out infinite; }
+.badge-stopping { background: var(--red-dim); color: var(--red); }
+.badge-stopping::before { background: var(--red); animation: sh-pulse 1.5s ease-in-out infinite; }
+.badge-stopped { background: var(--surface-2); color: var(--text-muted); }
+.badge-stopped::before { background: var(--text-muted); }
+.badge-paused { background: var(--yellow-dim); color: var(--yellow); }
+.badge-paused::before { background: var(--yellow); }
+@keyframes sh-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+.clock { font-family: var(--mono); font-size: 13px; color: var(--text-muted); }
+
+/* ---------- Main layout ------------------------------------------------------ */
+
+.sh-main {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+  min-height: 0;
+}
+
+.sh-center {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* ---------- Horizontal accordion --------------------------------------------- */
+
+.sh-accordion {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+/* Items animate open/closed by transitioning flex-grow: the closed
+   basis is the rail width, the open item takes all free space. While
+   two items swap, the browser splits the free space by their in-flight
+   grow ratios, which reads as one pane sliding shut while the other
+   slides open. */
+.sh-acc-item {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 0 0 var(--rail-w);
+  overflow: hidden;
+  transition: flex-grow 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.sh-acc-item.open { flex: 1 0 var(--rail-w); min-width: 0; }
+
+/* Vertical rail: always visible, click to open its section. */
+.sh-acc-rail {
+  width: var(--rail-w);
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 14px 0;
+  gap: 10px;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s;
+}
+.sh-acc-rail:hover { background: var(--surface-2); }
+.sh-acc-item.open > .sh-acc-rail {
+  background: var(--accent-dim);
+  border-right-color: var(--accent);
+  cursor: default;
+}
+.sh-acc-title {
+  writing-mode: vertical-rl;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.sh-acc-item.open .sh-acc-title { color: var(--accent); }
+.sh-acc-rail:hover .sh-acc-title { color: var(--text); }
+.sh-acc-item.open > .sh-acc-rail:hover .sh-acc-title { color: var(--accent); }
+
+/* Pane: always in layout (so the width can animate), clipped to 0 when
+   its item is closed, faded + hidden from a11y/focus once the slide
+   finishes. */
+.sh-acc-pane {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  flex-direction: column;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.18s ease, visibility 0s linear 0.35s;
+}
+.sh-acc-item.open > .sh-acc-pane {
+  opacity: 1;
+  visibility: visible;
+  transition: opacity 0.25s ease 0.08s, visibility 0s;
+}
+
+.sh-pane-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  flex: 1;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+.sh-spinner {
+  width: 26px;
+  height: 26px;
+  border: 3px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: sh-spin 0.8s linear infinite;
+}
+@keyframes sh-spin { to { transform: rotate(360deg); } }
+
+/* ---------- Analyzer drawer (bottom) ----------------------------------------- */
+
+.sh-drawer {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+}
+.sh-drawer-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 5px 14px;
+  cursor: pointer;
+  user-select: none;
+  flex-shrink: 0;
+}
+.sh-drawer-bar:hover { background: var(--surface-2); }
+.sh-drawer-title {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text-muted);
+}
+.sh-drawer-chevron { color: var(--text-muted); font-size: 11px; }
+/* The analyzer sets an explicit pixel height on the body (its own
+   top-edge resize), so the fold can transition height to 0 instead of
+   toggling display. !important beats the inline height while collapsed. */
+.sh-drawer-body {
+  min-height: 0;
+  overflow: hidden;
+  transition: height 0.28s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.2s ease;
+}
+.sh-drawer.collapsed .sh-drawer-body {
+  height: 0 !important;
+  opacity: 0;
+  visibility: hidden;
+}
+/* Suspend the slide while the analyzer's own resize handle is dragged. */
+.sh-drawer-body:has(.wb-analyzer-resize.dragging) { transition: none; }
+
+/* ---------- Right column: environment --------------------------------------- */
+
+.sh-resize-handle {
+  width: 5px;
+  cursor: col-resize;
+  background: var(--border);
+  flex-shrink: 0;
+  transition: background 0.15s;
+}
+.sh-resize-handle:hover, .sh-resize-handle.dragging { background: var(--accent); }
+
+.sh-right {
+  display: flex;
+  flex-direction: column;
+  width: 280px;
+  min-width: 160px;
+  max-width: 70vw;
+  border-left: 1px solid var(--border);
+  background: var(--surface);
+  overflow: hidden;
+  flex-shrink: 0;
+  transition: width 0.28s cubic-bezier(0.4, 0, 0.2, 1), min-width 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+}
+/* Suspend the slide while the operator is drag-resizing the column,
+   otherwise the width lags behind the cursor. */
+.sh-main:has(.sh-resize-handle.dragging) .sh-right { transition: none; }
+.sh-right-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 5px 10px 5px 14px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.sh-right-title {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.sh-fold-btn {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  line-height: 1;
+}
+.sh-fold-btn:hover { color: var(--text); background: var(--surface-2); }
+
+.sh-env-body {
+  flex: 1 1 80%;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* Collapsed environment column: thin vertical strip with rotated title. */
+.sh-right.collapsed {
+  width: 34px !important;
+  min-width: 34px;
+  cursor: pointer;
+}
+.sh-right.collapsed .sh-env-body { display: none; }
+.sh-right.collapsed .sh-right-bar {
+  flex-direction: column;
+  border-bottom: none;
+  padding: 12px 0;
+  gap: 10px;
+  height: 100%;
+  justify-content: flex-start;
+}
+.sh-right.collapsed .sh-right-title {
+  writing-mode: vertical-rl;
+}
+.sh-right.collapsed + .sh-resize-handle,
+.sh-main.env-collapsed .sh-resize-handle { display: none; }
+
+/* ---------- Toast ------------------------------------------------------------- */
+
+.sh-toast {
+  display: none;
+  position: fixed;
+  bottom: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: min(640px, 90vw);
+  padding: 9px 18px;
+  border-radius: var(--radius);
+  font-family: var(--mono);
+  font-size: 12px;
+  z-index: 1000;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+  background: var(--red-dim);
+  color: var(--red);
+  border: 1px solid rgba(251, 113, 133, 0.35);
+}
+.sh-toast.visible { display: block; }
+.sh-toast.sh-toast-info {
+  background: var(--surface-2);
+  color: var(--text-dim);
+  border-color: var(--border-light);
+}
+
+/* ---------- Confirm modal ------------------------------------------------------ */
+
+.sh-confirm {
+  position: fixed;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 950;
+}
+.sh-confirm.visible { display: flex; }
+.sh-confirm-backdrop { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.6); }
+.sh-confirm-panel {
+  position: relative;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  width: min(440px, 90vw);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+}
+.sh-confirm-header {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.sh-confirm-title {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--accent);
+  font-weight: 600;
+}
+.sh-confirm-body {
+  padding: 16px;
+  color: var(--text-dim);
+  font-size: 13px;
+  line-height: 1.5;
+  max-height: 50vh;
+  overflow: auto;
+}
+.sh-confirm-path {
+  font-family: var(--mono);
+  font-weight: 700;
+  font-size: 14px;
+  margin-bottom: 8px;
+  color: var(--text);
+}
+.sh-confirm-typed {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.sh-confirm-typed-label {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.sh-confirm-typed-input {
+  font-family: var(--mono);
+  font-size: 13px;
+  padding: 6px 10px;
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  outline: none;
+}
+.sh-confirm-typed-input:focus { border-color: var(--border-light); }
+.sh-confirm-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+}
+.sh-btn {
+  padding: 6px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-family: var(--sans);
+  font-size: 13px;
+  font-weight: 500;
+  background: var(--surface-2);
+  color: var(--text);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.sh-btn:hover:not(:disabled) { border-color: var(--border-light); }
+.sh-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.sh-btn-ghost { color: var(--text-muted); }
+.sh-btn-ghost:hover:not(:disabled) { color: var(--text); }
+.sh-btn-danger-solid { background: var(--red); color: #1a0a0a; border-color: var(--red); }
+.sh-btn-danger-solid:hover:not(:disabled) { background: #ff8595; border-color: #ff8595; }
+
+@media (max-width: 600px) {
+  .sh-right, .sh-resize-handle { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sh-acc-item,
+  .sh-acc-pane,
+  .sh-right,
+  .sh-drawer-body { transition: none; }
+}
+
+/* Unified cost label — amber mono text used in all views (single cluster,
+   multi cluster, kiro node). */
+.cost-label { color: var(--cost); font-family: var(--mono); font-size: 11px; white-space: nowrap; }
+
+/* ---------- Classified error rendering (errorFormat.js) ---------------------
+   Used by the Single Cluster agent panels and the Kiro Node turn-error
+   block: category badge + one-line headline + "more" unfold of the raw
+   error blob. Lives here because both sections share the fragment. */
+
+.ef-badge {
+  display: inline-block;
+  padding: 1px 7px;
+  margin-right: 6px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  white-space: nowrap;
+  vertical-align: baseline;
+  background: var(--surface-2);
+  color: var(--text-muted);
+}
+.ef-badge--throttled { background: var(--yellow-dim); color: var(--yellow); }
+.ef-badge--context { background: var(--accent-dim); color: var(--accent); }
+.ef-badge--transport { background: var(--red-dim); color: var(--red); }
+.ef-badge--empty { background: var(--surface-2); color: var(--text-muted); }
+.ef-badge--no-broadcast { background: var(--surface-2); color: var(--text-muted); }
+.ef-badge--unknown { background: var(--red-dim); color: var(--red); }
+
+.ef-headline { color: var(--text-dim); }
+
+.ef-reqid {
+  margin-left: 6px;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.ef-more {
+  margin-left: 6px;
+  font-size: 11px;
+  color: var(--accent);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+.ef-more:hover { color: var(--accent-hover); text-decoration: underline; }
+
+/* `display: block` below beats the UA's [hidden] { display: none }, which is
+   what made the unfold permanently open — restate it at higher specificity. */
+.ef-detail[hidden] { display: none; }
+
+.ef-detail {
+  display: block;
+  margin: 6px 0 2px;
+  padding: 8px;
+  max-height: 260px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

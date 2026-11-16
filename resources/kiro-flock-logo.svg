@@ -1,0 +1,136 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <!-- Background -->
+  <rect width="512" height="512" fill="#0a0a0f" />
+  
+  <!-- Gradients & Filters -->
+  <defs>
+    <linearGradient id="bird-gradient" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#9046ff" />
+      <stop offset="100%" stop-color="#a060ff" />
+    </linearGradient>
+  </defs>
+  
+  <!-- Murmuration Emblem -->
+  <g id="emblem">
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.86" transform="translate(184.49, 124.18) rotate(312.3) scale(0.54)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.95" transform="translate(344.54, 138.77) rotate(397.7) scale(0.50)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.98" transform="translate(374.33, 229.91) rotate(100.8) scale(0.62)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.92" transform="translate(299.22, 99.69) rotate(387.1) scale(0.50)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.95" transform="translate(357.18, 182.13) rotate(423.0) scale(0.75)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.99" transform="translate(162.47, 299.47) rotate(229.7) scale(1.10)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.86" transform="translate(224.45, 102.48) rotate(337.6) scale(0.50)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.97" transform="translate(353.18, 281.55) rotate(122.5) scale(0.81)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.89" transform="translate(242.97, 331.69) rotate(189.2) scale(0.80)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.91" transform="translate(327.47, 328.12) rotate(152.8) scale(0.99)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.87" transform="translate(269.89, 314.89) rotate(165.8) scale(0.82)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.93" transform="translate(244.98, 327.55) rotate(178.6) scale(1.05)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="#ffffff" opacity="1.00" transform="translate(146.43, 290.24) rotate(234.1) scale(0.66)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.93" transform="translate(354.40, 291.04) rotate(127.2) scale(0.66)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.97" transform="translate(384.86, 206.86) rotate(458.9) scale(0.50)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.88" transform="translate(245.91, 305.09) rotate(184.2) scale(0.97)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.86" transform="translate(128.65, 209.53) rotate(280.8) scale(0.61)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.98" transform="translate(163.39, 134.39) rotate(310.4) scale(0.60)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.94" transform="translate(356.55, 210.36) rotate(102.5) scale(0.86)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.89" transform="translate(208.83, 334.80) rotate(213.5) scale(0.74)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.99" transform="translate(150.07, 226.59) rotate(271.8) scale(0.71)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.87" transform="translate(298.09, 342.78) rotate(166.7) scale(0.95)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.92" transform="translate(334.20, 284.36) rotate(136.1) scale(0.76)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="#ffffff" opacity="1.00" transform="translate(350.30, 255.10) rotate(127.2) scale(1.01)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.89" transform="translate(263.58, 310.44) rotate(165.1) scale(1.26)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.89" transform="translate(347.73, 273.98) rotate(124.0) scale(0.99)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.85" transform="translate(367.72, 198.85) rotate(439.7) scale(0.82)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.97" transform="translate(296.80, 313.45) rotate(152.1) scale(0.83)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.99" transform="translate(135.42, 170.55) rotate(297.7) scale(0.78)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="#ffffff" opacity="1.00" transform="translate(322.72, 116.57) rotate(387.3) scale(0.50)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.95" transform="translate(245.25, 322.24) rotate(183.3) scale(1.27)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.87" transform="translate(333.04, 323.05) rotate(148.0) scale(0.97)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.92" transform="translate(363.76, 250.46) rotate(120.7) scale(0.64)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.90" transform="translate(360.04, 267.29) rotate(123.9) scale(0.71)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.94" transform="translate(346.00, 135.82) rotate(413.9) scale(0.50)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.95" transform="translate(284.95, 307.96) rotate(160.5) scale(1.09)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.91" transform="translate(217.89, 296.32) rotate(202.6) scale(1.27)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.89" transform="translate(350.85, 257.03) rotate(128.8) scale(1.02)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.98" transform="translate(167.36, 304.95) rotate(228.9) scale(0.98)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.88" transform="translate(188.32, 111.77) rotate(319.7) scale(0.50)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.91" transform="translate(320.70, 282.73) rotate(139.9) scale(0.80)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.92" transform="translate(320.71, 116.19) rotate(388.2) scale(0.50)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.89" transform="translate(167.47, 253.24) rotate(254.9) scale(1.03)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.94" transform="translate(319.43, 295.14) rotate(154.7) scale(1.11)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.94" transform="translate(344.92, 144.47) rotate(402.2) scale(0.61)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="1.00" transform="translate(172.14, 265.94) rotate(248.6) scale(1.06)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.89" transform="translate(192.15, 322.46) rotate(220.0) scale(1.14)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="1.00" transform="translate(283.67, 94.34) rotate(383.7) scale(0.50)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.95" transform="translate(134.56, 240.93) rotate(247.9) scale(0.55)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.89" transform="translate(191.20, 330.98) rotate(201.8) scale(1.05)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.93" transform="translate(372.56, 163.20) rotate(418.9) scale(0.75)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.95" transform="translate(352.90, 288.54) rotate(123.7) scale(0.95)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.96" transform="translate(177.60, 278.95) rotate(234.7) scale(0.63)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.86" transform="translate(175.50, 302.21) rotate(216.3) scale(0.82)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.94" transform="translate(215.87, 312.69) rotate(195.5) scale(0.76)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.92" transform="translate(227.51, 295.93) rotate(192.2) scale(0.94)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.99" transform="translate(149.44, 250.53) rotate(260.7) scale(0.95)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.89" transform="translate(359.66, 271.12) rotate(115.8) scale(1.02)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="#ffffff" opacity="1.00" transform="translate(288.21, 307.31) rotate(161.0) scale(1.19)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.97" transform="translate(167.78, 262.59) rotate(244.8) scale(0.85)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.94" transform="translate(190.12, 111.67) rotate(333.9) scale(0.50)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.90" transform="translate(148.65, 197.84) rotate(286.4) scale(0.65)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.95" transform="translate(150.73, 226.89) rotate(264.8) scale(0.87)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.94" transform="translate(349.70, 259.60) rotate(112.7) scale(0.86)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.95" transform="translate(270.72, 334.42) rotate(160.8) scale(0.94)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.96" transform="translate(159.50, 266.44) rotate(251.3) scale(0.89)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.95" transform="translate(176.71, 284.10) rotate(234.2) scale(1.10)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.98" transform="translate(153.97, 266.91) rotate(243.8) scale(0.70)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.94" transform="translate(155.92, 252.68) rotate(252.0) scale(0.77)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.99" transform="translate(139.33, 234.25) rotate(244.7) scale(0.71)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.95" transform="translate(318.34, 281.34) rotate(135.4) scale(0.77)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.90" transform="translate(254.70, 300.96) rotate(181.9) scale(1.30)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.92" transform="translate(354.45, 177.75) rotate(421.9) scale(0.50)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.94" transform="translate(146.09, 163.28) rotate(300.7) scale(0.50)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.96" transform="translate(339.25, 277.21) rotate(134.0) scale(1.13)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.86" transform="translate(230.49, 95.82) rotate(351.1) scale(0.50)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.89" transform="translate(152.24, 260.12) rotate(239.7) scale(1.00)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.96" transform="translate(241.29, 325.97) rotate(186.8) scale(0.96)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.88" transform="translate(240.84, 340.62) rotate(174.8) scale(1.23)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.87" transform="translate(147.88, 234.38) rotate(243.8) scale(0.93)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.93" transform="translate(281.25, 314.09) rotate(177.3) scale(1.11)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="1.00" transform="translate(354.36, 268.69) rotate(128.2) scale(0.95)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.93" transform="translate(358.46, 277.82) rotate(117.9) scale(0.91)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.99" transform="translate(136.86, 186.56) rotate(276.3) scale(0.72)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.97" transform="translate(255.12, 309.63) rotate(169.6) scale(1.02)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.89" transform="translate(301.27, 314.88) rotate(163.1) scale(1.25)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="#ffffff" opacity="1.00" transform="translate(235.45, 307.70) rotate(184.1) scale(0.80)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.97" transform="translate(131.70, 182.93) rotate(283.8) scale(0.71)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.92" transform="translate(153.60, 229.94) rotate(246.1) scale(0.96)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.97" transform="translate(343.22, 253.81) rotate(106.6) scale(0.87)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.96" transform="translate(378.64, 205.31) rotate(450.9) scale(0.81)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.90" transform="translate(143.70, 193.96) rotate(288.4) scale(0.85)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.87" transform="translate(288.22, 328.61) rotate(155.0) scale(0.80)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.99" transform="translate(373.83, 211.98) rotate(85.0) scale(0.59)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="#ffffff" opacity="1.00" transform="translate(148.35, 264.73) rotate(254.8) scale(1.00)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.87" transform="translate(319.90, 319.49) rotate(151.7) scale(0.84)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.99" transform="translate(155.24, 213.93) rotate(265.8) scale(0.64)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.98" transform="translate(356.85, 151.27) rotate(423.6) scale(0.55)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.96" transform="translate(185.05, 310.33) rotate(225.5) scale(0.85)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="1.00" transform="translate(224.96, 336.75) rotate(195.2) scale(0.96)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="1.00" transform="translate(144.60, 286.56) rotate(240.0) scale(0.89)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.97" transform="translate(304.71, 327.76) rotate(161.1) scale(1.13)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.90" transform="translate(162.75, 248.20) rotate(261.3) scale(0.87)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.97" transform="translate(319.94, 308.51) rotate(135.4) scale(1.23)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.85" transform="translate(133.14, 240.36) rotate(256.1) scale(0.87)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.93" transform="translate(235.63, 347.41) rotate(181.1) scale(1.03)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.92" transform="translate(237.81, 319.27) rotate(201.9) scale(1.00)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.95" transform="translate(231.56, 326.78) rotate(206.1) scale(0.99)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.95" transform="translate(143.09, 182.08) rotate(285.1) scale(0.61)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="#ffffff" opacity="1.00" transform="translate(300.55, 319.79) rotate(150.3) scale(1.14)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.94" transform="translate(357.48, 197.71) rotate(443.2) scale(0.70)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.97" transform="translate(136.65, 190.37) rotate(276.8) scale(0.71)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.99" transform="translate(191.54, 313.63) rotate(222.0) scale(1.16)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="#ffffff" opacity="1.00" transform="translate(165.20, 295.26) rotate(234.2) scale(1.11)" />
+    <path d="M 6,0 L -6,-4.5 L -2,0 L -6,4.5 Z" fill="url(#bird-gradient)" opacity="0.87" transform="translate(375.20, 264.66) rotate(128.9) scale(0.95)" />
+  </g>
+  
+  <!-- Wordmark -->
+  <text x="256" y="425" fill="#ffffff" 
+        font-family="JetBrains Mono, SFMono-Regular, Consolas, Roboto Mono, monospace" 
+        font-size="28" font-weight="500" letter-spacing="0.38em" text-anchor="middle">kiro-flock</text>
+</svg>

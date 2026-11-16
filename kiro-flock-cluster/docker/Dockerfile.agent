@@ -1,0 +1,95 @@
+# AGA agent container image — the ECS/Fargate equivalent of the EC2
+# cloud-init in lambda/userData.ts. Keep the two in sync: same Node major (22),
+# same pinned kiro-cli version, checksum and flavor (musl, aarch64). The agent
+# runner starts kiro-cli's V3 harness, which needs 3.0 or newer.
+#
+# Build context: dist/agent-image/, assembled at CDK synth time by
+# cdk/lib/aga-stack.ts (agent bundle + docker/ files copied together).
+# Built for linux/arm64 only (Fargate ARM64 = Graviton pricing, matching
+# the EC2 instance policy). Local builds use finch:
+#
+#   finch build --platform linux/arm64 -f Dockerfile.agent dist/agent-image
+#
+# CDK picks finch up via the CDK_DOCKER env var (set by scripts/install.sh).
+# Pinned by digest (linux/arm64 manifest), so a rebuild gets the image that
+# was reviewed rather than whatever the tag points at that day. Bump the digest
+# on purpose, after reading the AL2023 release notes:
+#   finch manifest inspect public.ecr.aws/amazonlinux/amazonlinux:2023
+FROM public.ecr.aws/amazonlinux/amazonlinux:2023@sha256:3f09d02367148ef8086b8dc7ce098d16b21da58bbfe1e1167da25a17df8f0e51
+
+# ---- base packages ---------------------------------------------------------
+# Mirrors userData.ts step 1. curl-minimal ships in the base image; the
+# full curl conflicts with it, so we rely on curl-minimal. shadow-utils
+# provides useradd. `|| dnf install -y nodejs` mirrors the EC2 fallback.
+# `dnf update` first: the base image is pinned by digest, so OS security fixes
+# published after that digest (the scan found nodejs22, sqlite and rpm updates)
+# only arrive through an explicit update at build time. Amazon Linux 2023
+# locks dnf to the image's own release, so a plain `dnf update` reports
+# "Nothing to do"; `--releasever=latest` moves to the current release.
+RUN dnf update -y --releasever=latest \
+  && dnf install -y unzip tar gzip shadow-utils \
+  && (dnf install -y nodejs22 || dnf install -y nodejs20 || dnf install -y nodejs) \
+  && dnf clean all
+# The CDK CLI for deployer clusters, pinned to the version the flock itself is
+# built with (package.json). Installed here as root rather than lazily by the
+# Deploy MCP at run time: the agent user cannot write to the global node
+# prefix, and a run-time `npm install -g aws-cdk` would fetch an unpinned
+# version from the registry with the deploy role's credentials in the
+# environment. Non-deployer clusters carry the ~60 MB unused.
+ARG AWS_CDK_VERSION=2.1148.1
+RUN npm install -g "aws-cdk@${AWS_CDK_VERSION}" && npm cache clean --force
+
+# Non-root user the agent loop runs as (Fargate equivalent of ec2-user).
+RUN useradd -m -u 1000 agent
+
+# ---- kiro-cli --------------------------------------------------------------
+# Mirrors userData.ts step 2: pinned version, musl build (statically
+# linked — the GNU build needs glibc 2.39+, AL2023 ships 2.34). Installed
+# as the agent user so binaries land in /home/agent/.local/bin, matching
+# how the systemd unit finds them on EC2.
+USER agent
+WORKDIR /home/agent
+#
+# The download is checked against the SHA-256 the publisher ships beside it
+# (<zip>.sha256). The hash is pinned here rather than fetched, so a swapped
+# zip and a swapped checksum file together still fail the build. When bumping
+# KIROCLI_VERSION, take the new hash from the .sha256 file and update both.
+# The 3.x installer does not prompt; `--no-modify-path` keeps it out of shell
+# rc files (PATH is set by ENV below). It must succeed: a failed install fails
+# the build instead of producing an image with no kiro-cli in it.
+ARG KIROCLI_VERSION=3.2.0
+ARG KIROCLI_SHA256=b94461d35b7dc934db4a39b59abc58cd87f3529e55367b9e4f3272058e5544af
+#
+# Download, verify, install and clean up in ONE layer. The scratch directory
+# holds the zip and the unpacked installer, about 2 GB; removing it in a later
+# RUN would leave all of that in this layer and triple the image.
+WORKDIR /home/agent/.kirocli-install
+RUN curl --proto '=https' --tlsv1.2 -sSf \
+       "https://desktop-release.q.us-east-1.amazonaws.com/${KIROCLI_VERSION}/kirocli-aarch64-linux-musl.zip" \
+       -o kirocli.zip \
+  && echo "${KIROCLI_SHA256}  kirocli.zip" | sha256sum -c - \
+  && unzip -q -o kirocli.zip \
+  && ./kirocli/install.sh --no-modify-path \
+  && test -x /home/agent/.local/bin/kiro-cli \
+  && rm -rf /home/agent/.kirocli-install/*
+WORKDIR /home/agent
+# No HEALTHCHECK on purpose: ECS Fargate does not run Dockerfile health checks
+# (a task's health comes from the task definition), and the control plane
+# already watches each agent through the log it writes to S3 every iteration.
+
+# ---- agent bundle ----------------------------------------------------------
+# The same dist/agent-bundle content the EC2 path syncs from
+# s3://<bucket>/agent/. Baked in at build time — no S3 sync at boot.
+USER root
+COPY agent-bundle/ /opt/aga/
+# Ensure LF line endings survive Windows checkout
+COPY entrypoint.sh /entrypoint.sh
+RUN sed -i 's/\r$//' /entrypoint.sh && chown -R agent:agent /opt/aga && chmod +x /entrypoint.sh
+
+# ---- runtime ---------------------------------------------------------------
+USER agent
+ENV HOME=/home/agent \
+    PATH=/home/agent/.local/bin:/usr/local/bin:/usr/bin:/bin \
+    AGA_WORKSPACE=/home/agent/kiro-flock-workspace
+WORKDIR /opt/aga
+ENTRYPOINT ["/entrypoint.sh"]

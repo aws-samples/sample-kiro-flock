@@ -1,17 +1,22 @@
 /**
- * Neighbour selection for the three coordination algorithms.
+ * Neighbour selection for the four coordination algorithms.
  *
- * Pure logic for amorphous and mesh. Swarm performs a single ListObjectsV2
- * to rank agents by last-modified timestamp. Kept in its own module so
- * bootstrap and the agent loop share the same selection rules.
+ * Pure logic for amorphous, mesh, and single. Swarm performs a single
+ * ListObjectsV2 to rank agents by last-modified timestamp. Kept in its
+ * own module so bootstrap and the agent loop share the same selection
+ * rules.
  *
  * Multi-cluster: the swarm listing scans `{clusterId}/store/agent-*` so
  * it only ranks agents within the caller's cluster. Other clusters'
  * stores live under different prefixes and are ignored.
+ *
+ * `single` returns no neighbours. Each agent works the direction alone
+ * (a cluster may run several of them as independent runs), so observation
+ * steps that reference neighbours are skipped at the prompt layer.
  */
 import { S3Client, ListObjectsV2Command } from "@aws-sdk/client-s3";
 
-export type Algorithm = "amorphous" | "mesh" | "swarm";
+export type Algorithm = "amorphous" | "mesh" | "swarm" | "single";
 
 export interface SelectNeighboursOpts {
   algorithm: Algorithm;
@@ -54,6 +59,14 @@ export function meshNeighbours(agentIndex: number, concurrency: number): number[
     if (i !== agentIndex) out.push(i);
   }
   return out;
+}
+
+/** Lone-agent mode — there are no peers. The agent works against the
+ *  cluster direction (and any per-agent directive) without any
+ *  neighbour observation. Always returns an empty list, regardless of
+ *  agentIndex or any other input. */
+export function singleNeighbours(): number[] {
+  return [];
 }
 
 /**
@@ -121,6 +134,9 @@ export async function selectNeighbours(
   }
   if (algorithm === "mesh") {
     return meshNeighbours(agentIndex, concurrency);
+  }
+  if (algorithm === "single") {
+    return singleNeighbours();
   }
   if (algorithm === "swarm") {
     const picked = await swarmNeighbours(agentIndex, swarmK, bucket, region, clusterId);

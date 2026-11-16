@@ -1,7 +1,7 @@
 /**
  * Reads agent iteration logs from the store/ prefix in S3.
  *
- * Each agent writes an append-only NDJSON file at {clusterId}/store/agent-N.ndjson.
+ * Each agent writes an append-only NDJSON file at store/agent-N.ndjson.
  * Each line is: { ts, iteration, action, result, next_intent }
  *
  * This class provides raw log access for post-run analysis of convergence,
@@ -25,10 +25,11 @@ export interface AgentStoreFile {
   size: number;
   lastModified: string;
   entryCount?: number;
+  /** Present when the file was found in a history/ archive rather than the
+   *  live store (i.e. the cluster was stopped or restarted and its logs
+   *  rotated). Value is the archive run id, e.g. "2026-07-30T19-09-12". */
+  archivedRun?: string;
 }
-
-/** Default cluster ID matching the Lambda handler's default. */
-const DEFAULT_CLUSTER_ID = "cluster_0";
 
 export class StoreReader {
   private s3: S3Client | null = null;
@@ -51,28 +52,33 @@ export class StoreReader {
     return { s3: this.s3, bucket: this.bucket };
   }
 
-  /**
-   * Build the S3 prefix for a cluster's store.
-   * Per-cluster layout: {clusterId}/store/
-   * Legacy layout (cluster_0 only): store/
-   */
-  private storePrefix(clusterId: string): string {
-    return `${clusterId}/store/`;
+  /** List all agent log files in {clusterId}/store/.
+   *
+   *  Falls back to the newest history/ archive when the live store is empty.
+   *  cluster_stop and cluster_start both rotate `{clusterId}/store/` into
+   *  `history/<ts>/{clusterId}/store/`, so without this fallback a run's
+   *  iteration logs become unreadable the moment the run ends — exactly when
+   *  post-run analysis wants them. Archived entries carry `archivedRun`. */
+  async listStoreLogs(clusterId?: string): Promise<AgentStoreFile[]> {
+    const prefix = clusterId ? `${clusterId}/store/` : "store/";
+    const live = await this.listLogsUnder(prefix);
+    if (live.length > 0) return live;
+
+    const archived = await this.findNewestArchive(prefix);
+    if (!archived) return [];
+    return archived.files.map(f => ({ ...f, archivedRun: archived.runId }));
   }
 
-  /** List all agent log files in the cluster's store/. */
-  async listStoreLogs(clusterId?: string): Promise<AgentStoreFile[]> {
+  /** List agent .ndjson files under an arbitrary store prefix. */
+  private async listLogsUnder(prefix: string): Promise<AgentStoreFile[]> {
     const { s3, bucket } = this.getS3();
-    const cid = clusterId || DEFAULT_CLUSTER_ID;
-    const prefix = this.storePrefix(cid);
-
     const res = await s3.send(new ListObjectsV2Command({
       Bucket: bucket,
       Prefix: prefix,
     }));
 
-    let files = (res.Contents ?? [])
-      .filter(o => o.Key && o.Key.endsWith(".ndjson"))
+    return (res.Contents ?? [])
+      .filter(o => o.Key && /agent-\d+\.ndjson$/.test(o.Key))
       .map(o => {
         const key = o.Key!;
         const match = key.match(/agent-(\d+)\.ndjson$/);
@@ -84,31 +90,42 @@ export class StoreReader {
         };
       })
       .sort((a, b) => a.agentId.localeCompare(b.agentId, undefined, { numeric: true }));
+  }
 
-    // Legacy fallback: if the cluster is cluster_0 and the per-cluster
-    // prefix returned nothing, check the bare store/ prefix from before
-    // the multi-cluster layout was introduced.
-    if (files.length === 0 && cid === DEFAULT_CLUSTER_ID) {
-      const legacyRes = await s3.send(new ListObjectsV2Command({
+  /** Newest history/<runId>/ archive containing agent logs for the given
+   *  store prefix. Archives preserve the full original key under the run
+   *  folder, so the probe is `history/<runId>/{clusterId}/store/`. Run ids
+   *  are ISO-derived timestamps, so lexicographic order is time order. */
+  private async findNewestArchive(
+    storePrefix: string,
+  ): Promise<{ runId: string; files: AgentStoreFile[] } | null> {
+    const { s3, bucket } = this.getS3();
+
+    const runIds: string[] = [];
+    let continuationToken: string | undefined;
+    do {
+      const res = await s3.send(new ListObjectsV2Command({
         Bucket: bucket,
-        Prefix: "store/",
+        Prefix: "history/",
+        Delimiter: "/",
+        ContinuationToken: continuationToken,
       }));
-      files = (legacyRes.Contents ?? [])
-        .filter(o => o.Key && o.Key.endsWith(".ndjson"))
-        .map(o => {
-          const key = o.Key!;
-          const match = key.match(/agent-(\d+)\.ndjson$/);
-          return {
-            key,
-            agentId: match ? `agent-${match[1]}` : key.replace("store/", ""),
-            size: o.Size ?? 0,
-            lastModified: o.LastModified?.toISOString() ?? "",
-          };
-        })
-        .sort((a, b) => a.agentId.localeCompare(b.agentId, undefined, { numeric: true }));
-    }
+      for (const cp of res.CommonPrefixes ?? []) {
+        const p = cp.Prefix; // "history/<runId>/"
+        if (p) runIds.push(p.slice("history/".length).replace(/\/$/, ""));
+      }
+      continuationToken = res.IsTruncated ? res.NextContinuationToken : undefined;
+    } while (continuationToken);
 
-    return files;
+    runIds.sort().reverse();
+
+    // Probe newest-first. Most archives belong to other clusters or other
+    // runs, so cap the probes rather than scanning the whole history.
+    for (const runId of runIds.slice(0, 25)) {
+      const files = await this.listLogsUnder(`history/${runId}/${storePrefix}`);
+      if (files.length > 0) return { runId, files };
+    }
+    return null;
   }
 
   /** Read and parse the full NDJSON log for one agent. */
@@ -128,11 +145,14 @@ export class StoreReader {
       .filter((e): e is AgentLogEntry => e !== null);
   }
 
-  /** Read all agent logs and return a structured summary for analysis. */
+  /** Read all agent logs and return a structured summary for analysis.
+   *  When the live store is empty the logs come from the newest history/
+   *  archive (see listStoreLogs) and `source` names the archive run. */
   async readAllLogs(clusterId?: string): Promise<{
     agents: { agentId: string; entries: AgentLogEntry[] }[];
     totalIterations: number;
     totalEntries: number;
+    source: string;
   }> {
     const files = await this.listStoreLogs(clusterId);
     const agents = await Promise.all(
@@ -148,6 +168,9 @@ export class StoreReader {
       0
     );
 
-    return { agents, totalIterations: maxIteration, totalEntries };
+    const archivedRun = files.find(f => f.archivedRun)?.archivedRun;
+    const source = archivedRun ? `history/${archivedRun} (archived run)` : "live";
+
+    return { agents, totalIterations: maxIteration, totalEntries, source };
   }
 }

@@ -42,8 +42,28 @@ import {
   type ClusterConfig,
   type ClusterStateValue,
 } from "./s3Store";
+import { ecsContextFromEnv, describeCluster as describeEcsCluster } from "./ecsManager";
+import { loadPricingCatalog, perAgentHourlyRate } from "./pricing";
 
 const BUCKET = process.env.BUCKET_NAME!;
+
+// ---------- Pricing catalog --------------------------------------------------
+// PricingCatalog, FARGATE_SIZES, loadPricingCatalog, and perAgentHourlyRate
+// now live in ./pricing (shared with dashboardBuilder.ts and handler.ts).
+
+/**
+ * Infra cost in USD for one agent's runtime: elapsed time since its own
+ * launch at the per-agent hourly rate. Null when the rate is unknown or
+ * the agent has no live runtime (no launch time).
+ */
+function perAgentInfraCost(hourlyRate: number | null, launchTime: string | null): number | null {
+  if (hourlyRate == null || !launchTime) return null;
+  const startMs = new Date(launchTime).getTime();
+  if (isNaN(startMs)) return null;
+  const elapsedHours = (Date.now() - startMs) / 3_600_000;
+  if (elapsedHours <= 0) return null;
+  return elapsedHours * hourlyRate;
+}
 
 // How many trailing bytes to read per agent log. 8 KiB is plenty for the
 // last two entries even when the file grows unbounded — each iteration
@@ -91,6 +111,20 @@ interface AgentSnapshot {
   status: string;
   neighbours: string[];
   metrics: AgentMetrics;
+  /** True when an `agent-N.directive.md` file exists for this agent.
+   *  Set by listing the cluster's store/ once per snapshot rebuild
+   *  (one ListObjectsV2 cluster-wide, independent of N). The body is
+   *  fetched on demand by the dashboard via /cluster/agent-directive. */
+  hasDirective: boolean;
+  /** Lifetime credit spend of this agent (sum of all iterations), read
+   *  from the running total in the last line of agent-N.costs.ndjson.
+   *  Null when the agent has no cost data (pre-cost-tracking runs). */
+  totalCredits: number | null;
+  /** Estimated infra cost (this agent's EC2 instance / Fargate task) in
+   *  USD for the current run: elapsed time since its launch at the
+   *  per-agent hourly rate. Null when pricing is unavailable or the
+   *  agent has no live runtime. */
+  infraCostUsd: number | null;
 }
 
 interface ClusterSnapshot {
@@ -99,9 +133,24 @@ interface ClusterSnapshot {
   clusterState: ClusterStateValue;
   clusterStartTime: string | null;
   paused: boolean;
+  /** True when at least one agent in the cluster has a per-agent
+   *  directive. Mirrors `agents.some(a => a.hasDirective)` and is
+   *  surfaced via /cluster/list so WeltenBuilder can show the pill
+   *  without an extra fetch. */
+  hasAnyDirective: boolean;
   /** Pass 7: selected config fields the dashboard needs to theme itself
    *  and to show the right labels. Null when config.json is missing. */
   config: ClusterConfig | null;
+  /** Cluster-wide credit spend: sum of every agent's totalCredits. Null
+   *  when no agent has any cost data. Surfaced through /cluster/status
+   *  and /cluster/list so the dashboard and WeltenBuilder can show costs
+   *  without extra S3 reads. */
+  totalCredits: number | null;
+  /** Estimated infrastructure cost (EC2 or Fargate) in USD for the
+   *  current run, calculated from cluster start time, instance pricing,
+   *  and concurrency. Null when pricing data is unavailable or cluster
+   *  is stopped. Updated on every snapshot rebuild. */
+  infraCostUsd: number | null;
 }
 
 // ---------- Config -----------------------------------------------------------
@@ -166,6 +215,34 @@ async function listAgentIndexes(clusterId: string): Promise<Array<{ index: numbe
     .sort((a, b) => a.index - b.index);
 }
 
+/**
+ * Enumerate agent indexes that have a per-agent directive file
+ * (`agent-N.directive.md`) in the cluster's store. One LIST call cluster-
+ * wide, independent of N. Used by the snapshot to set `hasDirective` on
+ * each agent and `hasAnyDirective` at the cluster level so the dashboard
+ * and WeltenBuilder can show pills without per-agent HEAD requests.
+ */
+async function listAgentDirectives(clusterId: string): Promise<Set<number>> {
+  const prefix = `${clusterPrefix(clusterId)}store/agent-`;
+  const keyPattern = new RegExp(`^${clusterPrefix(clusterId)}store/agent-(\\d+)\\.directive\\.md$`);
+  const found = new Set<number>();
+  let token: string | undefined;
+  do {
+    const res = await s3.send(new ListObjectsV2Command({
+      Bucket: BUCKET,
+      Prefix: prefix,
+      ContinuationToken: token,
+    }));
+    for (const obj of res.Contents ?? []) {
+      if (!obj.Key) continue;
+      const match = obj.Key.match(keyPattern);
+      if (match) found.add(Number(match[1]));
+    }
+    token = res.IsTruncated ? res.NextContinuationToken : undefined;
+  } while (token);
+  return found;
+}
+
 // ---------- Agent log tails --------------------------------------------------
 
 async function readAgentTail(clusterId: string, agentIndex: number): Promise<{
@@ -203,9 +280,72 @@ async function readAgentTail(clusterId: string, agentIndex: number): Promise<{
   }
 }
 
+/**
+ * Tail-read `agent-N.costs.ndjson` and return the running lifetime credit
+ * total from its last parsable line. Each line carries `totalCredits`
+ * (written by the agent loop), so an 8 KiB tail is always enough — the
+ * file never needs a full scan regardless of run length. Same ranged-GET
+ * pattern and error handling as readAgentTail; missing file (agent
+ * predates cost tracking, or hasn't finished an iteration) returns null.
+ */
+async function readAgentCostTail(clusterId: string, agentIndex: number): Promise<{
+  agentIndex: number;
+  totalCredits: number | null;
+}> {
+  const key = `${clusterPrefix(clusterId)}store/agent-${agentIndex}.costs.ndjson`;
+  try {
+    const res = await s3.send(new GetObjectCommand({
+      Bucket: BUCKET,
+      Key: key,
+      Range: `bytes=-${TAIL_BYTES}`,
+    }));
+    const body = (await res.Body?.transformToString()) ?? "";
+    const contentRange = res.ContentRange ?? "";
+    const startsAtZero = /^bytes 0-/.test(contentRange);
+    const lines = body.split("\n");
+    if (!startsAtZero && lines.length > 1) lines.shift(); // drop partial leading line
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i].trim();
+      if (!line) continue;
+      try {
+        const entry = JSON.parse(line) as { totalCredits?: unknown };
+        if (typeof entry.totalCredits === "number" && Number.isFinite(entry.totalCredits)) {
+          return { agentIndex, totalCredits: entry.totalCredits };
+        }
+      } catch { /* malformed line — keep walking back */ }
+    }
+    return { agentIndex, totalCredits: null };
+  } catch (err: unknown) {
+    const name = (err as { name?: string }).name;
+    if (name === "NoSuchKey" || name === "NoSuchBucket" || name === "InvalidRange") {
+      return { agentIndex, totalCredits: null };
+    }
+    throw err;
+  }
+}
+
 // ---------- EC2 --------------------------------------------------------------
 
-async function describeFleet(clusterId: string): Promise<InstanceInfo[]> {
+async function describeFleet(clusterId: string, computeType: "ec2" | "ecs" = "ec2"): Promise<InstanceInfo[]> {
+  if (computeType === "ecs") {
+    // ECS fleet: task ARNs fill the instanceId slot (opaque per-agent
+    // runtime id as far as the snapshot/dashboard are concerned). An
+    // older deployment without the ECS env vars just reports an empty
+    // fleet rather than failing the whole snapshot.
+    try {
+      const ctx = ecsContextFromEnv(BUCKET);
+      const tasks = await describeEcsCluster(ctx, clusterId);
+      return tasks.map(t => ({
+        instanceId: t.taskArn,
+        agentIndex: t.agentIndex,
+        state: t.state,
+        launchTime: t.launchTime,
+      }));
+    } catch (err: unknown) {
+      console.warn(`describeFleet[${clusterId}]: ecs describe failed:`, err instanceof Error ? err.message : err);
+      return [];
+    }
+  }
   const res = await ec2.send(new DescribeInstancesCommand({
     Filters: [
       { Name: "tag:Project", Values: ["kiro-flock"] },
@@ -342,15 +482,20 @@ function amorphousNeighbours(index: number, concurrency: number, radius: number)
  *
  * swarmRanked is the pre-sorted output of listAgentIndexes() re-ordered
  * by lastModified desc. For swarm we take the top K excluding self.
+ *
+ * `single` returns no neighbours — the lone agent has no peers to read.
  */
 function neighboursForAgent(
   index: number,
   concurrency: number,
-  algorithm: "amorphous" | "mesh" | "swarm",
+  algorithm: "amorphous" | "mesh" | "swarm" | "single",
   radius: number,
   swarmK: number,
   swarmRanked: number[],
 ): string[] {
+  if (algorithm === "single") {
+    return [];
+  }
   if (algorithm === "mesh") {
     const out: string[] = [];
     for (let i = 0; i < concurrency; i++) {
@@ -394,15 +539,20 @@ export async function handler(event: SnapshotBuilderEvent, _context: unknown): P
   // silently no-op.
   const clusterId = event?.clusterId ?? DEFAULT_CLUSTER_ID;
 
-  // Enumerate agents from S3 and read config + state.json in parallel.
-  // We use the union of config.concurrency and the on-disk agent indexes
-  // so a mid-restart cluster (logs lagging config, or vice versa) still
-  // gets a complete snapshot.
-  const [config, agentIndexEntries, instances, stateRead] = await Promise.all([
-    readClusterConfig(clusterId),
+  // Config first: describeFleet needs the cluster's computeType to know
+  // whether the fleet lives in EC2 (DescribeInstances) or ECS (ListTasks).
+  // Then enumerate agents from S3 and read state.json in parallel. We use
+  // the union of config.concurrency and the on-disk agent indexes so a
+  // mid-restart cluster (logs lagging config, or vice versa) still gets a
+  // complete snapshot.
+  const config = await readClusterConfig(clusterId);
+  const computeType: "ec2" | "ecs" = config?.computeType === "ecs" ? "ecs" : "ec2";
+  const [agentIndexEntries, instances, stateRead, directiveSet, pricing] = await Promise.all([
     listAgentIndexes(clusterId),
-    describeFleet(clusterId),
+    describeFleet(clusterId, computeType),
     readClusterStateDoc(clusterId),
+    listAgentDirectives(clusterId),
+    loadPricingCatalog(s3, BUCKET),
   ]);
   const paused = stateRead.paused;
 
@@ -433,15 +583,23 @@ export async function handler(event: SnapshotBuilderEvent, _context: unknown): P
     .map((e) => e.index);
 
   // Tails + metrics in parallel. Metrics only need to run when there are
-  // live instances; an empty list is cheap to short-circuit.
+  // live instances; an empty list is cheap to short-circuit. CloudWatch
+  // per-instance metrics are AWS/EC2 only — ECS tasks would need Container
+  // Insights, so on ecs compute the panels show empty metrics instead.
   const instanceIds = instances.map(i => i.instanceId).filter(Boolean);
-  const [tails, metricsMap] = await Promise.all([
+  const [tails, costTails, metricsMap] = await Promise.all([
     Promise.all(allIndexes.map((i) => readAgentTail(clusterId, i))),
-    instanceIds.length > 0 ? getInstanceMetrics(instanceIds) : Promise.resolve<Record<string, AgentMetrics>>({}),
+    Promise.all(allIndexes.map((i) => readAgentCostTail(clusterId, i))),
+    computeType === "ec2" && instanceIds.length > 0 ? getInstanceMetrics(instanceIds) : Promise.resolve<Record<string, AgentMetrics>>({}),
   ]);
 
   const tailByIndex = new Map(tails.map(t => [t.agentIndex, t]));
+  const costByIndex = new Map(costTails.map(t => [t.agentIndex, t.totalCredits]));
   const instanceByIndex = new Map(instances.map(i => [i.agentIndex, i]));
+
+  // Per-agent infra hourly rate (same for every agent — one config per
+  // cluster). Computed once, applied per agent against its own launch time.
+  const agentHourlyRate = perAgentHourlyRate(pricing, config);
 
   const now = Date.now();
   const totalAgents = Math.max(concurrency, allIndexes.length > 0 ? (allIndexes[allIndexes.length - 1] + 1) : 0);
@@ -479,8 +637,29 @@ export async function handler(event: SnapshotBuilderEvent, _context: unknown): P
       status,
       neighbours: neighboursForAgent(i, totalAgents, algorithm, radius, swarmK, swarmRanked),
       metrics,
+      hasDirective: directiveSet.has(i),
+      totalCredits: costByIndex.get(i) ?? null,
+      infraCostUsd: perAgentInfraCost(agentHourlyRate, inst?.launchTime ?? null),
     };
   });
+
+  // Cluster total = sum of agent lifetime totals. Null (not 0) when no
+  // agent has cost data, so the UI can distinguish "free" from "unknown".
+  const creditValues = agents
+    .map(a => a.totalCredits)
+    .filter((v): v is number => v !== null);
+  const clusterTotalCredits = creditValues.length > 0
+    ? creditValues.reduce((sum, v) => sum + v, 0)
+    : null;
+
+  // Cluster infra cost = sum of per-agent runtime costs (each agent's
+  // elapsed time since its own launch). Null when no agent has one.
+  const infraValues = agents
+    .map(a => a.infraCostUsd)
+    .filter((v): v is number => v !== null);
+  const clusterInfraCost = infraValues.length > 0
+    ? infraValues.reduce((sum, v) => sum + v, 0)
+    : null;
 
   const clusterState: ClusterStateValue = stateRead.state;
   const launchTimes = instances.map(i => i.launchTime).filter(Boolean) as string[];
@@ -492,7 +671,10 @@ export async function handler(event: SnapshotBuilderEvent, _context: unknown): P
     clusterState,
     clusterStartTime,
     paused,
+    hasAnyDirective: directiveSet.size > 0,
     config: config ?? null,
+    totalCredits: clusterTotalCredits,
+    infraCostUsd: clusterInfraCost,
   };
 
   await s3.send(new PutObjectCommand({
