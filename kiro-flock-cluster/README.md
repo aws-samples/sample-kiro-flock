@@ -593,7 +593,7 @@ This is a sample project. The security model assumes a single operator on a sing
 
 Copyright 2026 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 
-Apache License 2.0 with attribution. See [LICENSE](LICENSE).
+Apache License 2.0 with attribution. See [LICENSE](../LICENSE).
 
 **Author:** Ivo Kammerath<br>
 **Reviewer:** Martin Karrer, Ben Freiberg
